@@ -2,23 +2,22 @@ const port = process.env.PORT || 3000;
 const io = require("socket.io")(port, { cors: { origin: "*" } });
 
 let waitingUser = null;
-let onlineUsers = {}; // { "اسم_المستخدم": "socket_id" }
+let onlineUsers = {}; 
 
 io.on("connection", (socket) => {
     
+    // تسجيل المستخدم لربط الاسم بالـ ID
     socket.on("register_user", (username) => {
-        if (!username) return;
-        socket.username = username;
-        onlineUsers[username] = socket.id; // تحديث الـ ID دائماً عند كل دخول
-        console.log(`المستخدم ${username} مسجل الآن بـ ID: ${socket.id}`);
+        if (username) {
+            socket.username = username;
+            onlineUsers[username] = socket.id;
+            console.log(`المستخدم ${username} متصل بـ ID: ${socket.id}`);
+        }
     });
 
+    // البحث عن شريك
     socket.on("find_partner", () => {
-        // تنظيف أي غرفة قديمة كان فيها المستخدم
-        if (socket.roomId) {
-            socket.leave(socket.roomId);
-            socket.roomId = null;
-        }
+        if (socket.roomId) { socket.leave(socket.roomId); socket.roomId = null; }
 
         if (waitingUser && waitingUser.id !== socket.id && waitingUser.connected) {
             const partner = waitingUser;
@@ -37,20 +36,38 @@ io.on("connection", (socket) => {
         }
     });
 
+    // إرسال رسالة في الغرفة العشوائية
     socket.on("message", (msg) => {
+        if (socket.roomId) socket.to(socket.roomId).emit("message", msg);
+    });
+
+    // إرسال طلب صداقة للطرف الآخر في الغرفة
+    socket.on("send_friend_request", (myName) => {
         if (socket.roomId) {
-            socket.to(socket.roomId).emit("message", msg);
+            socket.to(socket.roomId).emit("friend_request_received", { name: myName });
         }
     });
 
+    // قبول الصداقة
+    socket.on("accept_friend", (data) => {
+        if (socket.roomId) {
+            socket.to(socket.roomId).emit("friend_added_successfully", data.name);
+        }
+    });
+
+    // الرسائل الخاصة بين الأصدقاء
     socket.on("private_message", (data) => {
-        // التأكد من أن المستلم مسجل حالياً في الـ onlineUsers
-        const targetSocketId = onlineUsers[data.to];
-        if (targetSocketId) {
-            io.to(targetSocketId).emit("private_message_received", {
-                from: data.from,
-                text: data.text
-            });
+        const targetId = onlineUsers[data.to];
+        if (targetId) {
+            io.to(targetId).emit("private_message_received", { from: data.from, text: data.text });
+        }
+    });
+
+    // حذف الصداقة من الطرفين
+    socket.on("remove_friend_request", (data) => {
+        const targetId = onlineUsers[data.friendName];
+        if (targetId) {
+            io.to(targetId).emit("friend_removed_by_other", { name: data.myName });
         }
     });
 
