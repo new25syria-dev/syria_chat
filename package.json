@@ -1,19 +1,15 @@
 {
-  "name": "backend",
+  "name": "syria-chat-server",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "سيرفر تطبيق سوريا شات",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "dotenv": "^17.4.1",
-    "express": "^5.2.1",
-    "mongoose": "^9.4.1",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.7.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
