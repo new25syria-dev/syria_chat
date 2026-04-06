@@ -6,7 +6,6 @@ let onlineUsers = {};
 
 io.on("connection", (socket) => {
     
-    // تسجيل المستخدم لربط الاسم بالـ ID
     socket.on("register_user", (username) => {
         if (username) {
             socket.username = username;
@@ -15,20 +14,16 @@ io.on("connection", (socket) => {
         }
     });
 
-    // البحث عن شريك
     socket.on("find_partner", () => {
         if (socket.roomId) { socket.leave(socket.roomId); socket.roomId = null; }
-
         if (waitingUser && waitingUser.id !== socket.id && waitingUser.connected) {
             const partner = waitingUser;
             waitingUser = null;
             const roomId = `room_${partner.id}_${socket.id}`;
-            
             socket.join(roomId);
             partner.join(roomId);
             socket.roomId = roomId;
             partner.roomId = roomId;
-
             io.to(roomId).emit("system_msg", "تم العثور على شريك! 🇸🇾");
         } else {
             waitingUser = socket;
@@ -36,26 +31,22 @@ io.on("connection", (socket) => {
         }
     });
 
-    // إرسال رسالة في الغرفة العشوائية
     socket.on("message", (msg) => {
         if (socket.roomId) socket.to(socket.roomId).emit("message", msg);
     });
 
-    // إرسال طلب صداقة للطرف الآخر في الغرفة
     socket.on("send_friend_request", (myName) => {
         if (socket.roomId) {
             socket.to(socket.roomId).emit("friend_request_received", { name: myName });
         }
     });
 
-    // قبول الصداقة
     socket.on("accept_friend", (data) => {
         if (socket.roomId) {
             socket.to(socket.roomId).emit("friend_added_successfully", data.name);
         }
     });
 
-    // الرسائل الخاصة بين الأصدقاء
     socket.on("private_message", (data) => {
         const targetId = onlineUsers[data.to];
         if (targetId) {
@@ -63,7 +54,6 @@ io.on("connection", (socket) => {
         }
     });
 
-    // حذف الصداقة من الطرفين
     socket.on("remove_friend_request", (data) => {
         const targetId = onlineUsers[data.friendName];
         if (targetId) {
