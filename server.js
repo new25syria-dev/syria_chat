@@ -2,17 +2,19 @@ const port = process.env.PORT || 3000;
 const io = require("socket.io")(port, { cors: { origin: "*" } });
 
 let waitingUser = null;
-let onlineUsers = {}; // لربط اسم المستخدم بـ ID السوكيت
+let onlineUsers = {}; 
 
 io.on("connection", (socket) => {
-    // تسجيل المستخدم عند دخول التطبيق
+    // تسجيل المستخدم لربط الاسم بالـ ID
     socket.on("register_user", (username) => {
-        socket.username = username;
-        onlineUsers[username] = socket.id;
-        console.log(`${username} متصل الآن`);
+        if (username) {
+            socket.username = username;
+            onlineUsers[username] = socket.id;
+            console.log(`${username} متصل`);
+        }
     });
 
-    // الدردشة العشوائية
+    // البحث عن شريك (تم إصلاح التكرار)
     socket.on("find_partner", () => {
         if (waitingUser && waitingUser.id !== socket.id) {
             const partner = waitingUser;
@@ -29,32 +31,36 @@ io.on("connection", (socket) => {
         }
     });
 
+    // إرسال رسالة عامة في الدردشة العشوائية
     socket.on("message", (msg) => {
         if (socket.roomId) socket.to(socket.roomId).emit("message", msg);
     });
 
-    // طلب الصداقة وتبادل الأسماء
-    socket.on("send_friend_request", (myUserName) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit("friend_request_received", { name: myUserName });
-        }
-    });
-
-    socket.on("accept_friend", (myData) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit("friend_added_successfully", myData.name);
-        }
-    });
-
-    // إرسال رسالة خاصة لصديق محدد
+    // إرسال رسالة خاصة لصديق
     socket.on("private_message", (data) => {
         const targetId = onlineUsers[data.to];
         if (targetId) {
             io.to(targetId).emit("private_message_received", {
-                from: socket.username,
+                from: data.from,
                 text: data.text
             });
         }
+    });
+
+    // حذف الصداقة من الطرف الآخر
+    socket.on("remove_friend_request", (data) => {
+        const targetId = onlineUsers[data.friendName];
+        if (targetId) {
+            io.to(targetId).emit("friend_removed_by_other", { name: data.myName });
+        }
+    });
+
+    socket.on("send_friend_request", (name) => {
+        if (socket.roomId) socket.to(socket.roomId).emit("friend_request_received", { name: name });
+    });
+
+    socket.on("accept_friend", (data) => {
+        if (socket.roomId) socket.to(socket.roomId).emit("friend_added_successfully", data.name);
     });
 
     socket.on("skip_chat", () => {
