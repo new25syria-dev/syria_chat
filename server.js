@@ -1,26 +1,24 @@
 const port = process.env.PORT || 3000;
 const io = require("socket.io")(port, {
     cors: {
-        origin: "*", // السماح بجميع الاتصالات من تطبيقات الموبايل
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
 
-console.log(`السيرفر يعمل الآن على المنفذ: ${port}`);
+console.log(`سيرفر سوريا شات يعمل على المنفذ: ${port}`);
 
 let waitingUser = null;
 
 io.on("connection", (socket) => {
-    console.log("مستخدم جديد متصل: " + socket.id);
+    console.log("اتصال جديد: " + socket.id);
 
-    // 1. البحث عن شريك (عشوائي)
+    // 1. البحث عن شريك (مع منع التكرار)
     socket.on("find_partner", () => {
-        // التأكد أن المستخدم ليس هو نفسه المنتظر
         if (waitingUser && waitingUser.id !== socket.id) {
             const partner = waitingUser;
             waitingUser = null;
 
-            // إنشاء غرفة فريدة للمستخدمين
             const roomId = `room_${partner.id}_${socket.id}`;
             
             socket.join(roomId);
@@ -29,52 +27,55 @@ io.on("connection", (socket) => {
             socket.roomId = roomId;
             partner.roomId = roomId;
 
-            // إرسال إشعار للطرفين ببدء الدردشة
-            io.to(roomId).emit("system_msg", "تم العثور على شريك! يمكنك البدء بالدردشة الآن 🇸🇾");
-            console.log(`تم الربط بين ${socket.id} و ${partner.id} في غرفة: ${roomId}`);
+            // إرسال إشعار للطرفين ببدء المحادثة
+            io.to(roomId).emit("system_msg", "تم العثور على شريك! أهلاً بك في سوريا شات 🇸🇾");
         } else {
             waitingUser = socket;
             socket.emit("system_msg", "جاري البحث عن شريك متاح... يرجى الانتظار.");
         }
     });
 
-    // 2. استقبال وإرسال الرسائل
+    // 2. إرسال واستقبال الرسائل
     socket.on("message", (msg) => {
         if (socket.roomId) {
-            // إرسال الرسالة للطرف الآخر في نفس الغرفة فقط
             socket.to(socket.roomId).emit("message", msg);
         }
     });
 
-    // 3. نظام طلب الصداقة
+    // 3. طلب الصداقة
     socket.on("send_friend_request", () => {
         if (socket.roomId) {
-            socket.to(socket.roomId).emit("friend_request_received", { from: socket.id });
-            console.log(`طلب صداقة من ${socket.id}`);
+            socket.to(socket.roomId).emit("friend_request_received");
         }
     });
 
-    // 4. قبول طلب الصداقة
+    // 4. قبول الصداقة (تعديل حيوي للمزامنة بين الطرفين)
     socket.on("accept_friend", () => {
         if (socket.roomId) {
-            io.to(socket.roomId).emit("system_msg", "تهانينا! لقد أصبحتم أصدقاء الآن ✨");
+            // نرسل للطرفين معاً لضمان الحفظ في كلا الهاتفين
+            io.to(socket.roomId).emit("friend_added_successfully", "شريك جديد");
+            io.to(socket.roomId).emit("system_msg", "تمت إضافة الصديق بنجاح لدى الطرفين! ✅");
         }
     });
 
-    // 5. إنهاء المحادثة (التخطي)
+    // 5. التخطي (إصلاح مشكلة البحث الجديد)
     socket.on("skip_chat", () => {
         if (socket.roomId) {
             socket.to(socket.roomId).emit("system_msg", "قام الشريك بإنهاء المحادثة.");
             
-            // مغادرة الغرفة
-            io.in(socket.roomId).socketsLeave(socket.roomId);
-            socket.roomId = null;
+            const oldRoom = socket.roomId;
+            // إخراج المستخدمين من الغرفة القديمة
+            io.in(oldRoom).socketsLeave(oldRoom);
             
-            console.log(`انتهت المحادثة في الغرفة بناءً على طلب المستخدم.`);
+            socket.roomId = null;
+        }
+        // تنظيف قائمة الانتظار إذا كان المستخدم هو من ينتظر
+        if (waitingUser && waitingUser.id === socket.id) {
+            waitingUser = null;
         }
     });
 
-    // 6. عند قطع الاتصال (إغلاق التطبيق)
+    // 6. عند المغادرة أو قطع الاتصال
     socket.on("disconnect", () => {
         if (waitingUser && waitingUser.id === socket.id) {
             waitingUser = null;
