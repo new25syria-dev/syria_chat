@@ -1,3 +1,4 @@
+const { Pool } = require("pg");
 const io = require("socket.io")(process.env.PORT || 3000, {
   cors: { origin: "*" },
 });
@@ -11,6 +12,136 @@ function log(...args) {
   if (DEBUG) {
     console.log(new Date().toISOString(), ...args);
   }
+}
+
+// =========================
+// PostgreSQL
+// =========================
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing. Add your Render Postgres internal URL.");
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes("localhost")
+    ? false
+    : { rejectUnauthorized: false },
+});
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS friendships (
+      user_a TEXT NOT NULL,
+      user_b TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_a, user_b)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pending_friend_requests (
+      target_username TEXT NOT NULL,
+      sender_username TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (target_username, sender_username)
+    );
+  `);
+
+  log("[DB] tables initialized");
+}
+
+function normalizePair(a, b) {
+  return a < b ? [a, b] : [b, a];
+}
+
+async function dbAddFriendship(userA, userB) {
+  const [a, b] = normalizePair(userA, userB);
+  await pool.query(
+    `
+    INSERT INTO friendships (user_a, user_b)
+    VALUES ($1, $2)
+    ON CONFLICT (user_a, user_b) DO NOTHING
+    `,
+    [a, b]
+  );
+}
+
+async function dbRemoveFriendship(userA, userB) {
+  const [a, b] = normalizePair(userA, userB);
+  await pool.query(
+    `DELETE FROM friendships WHERE user_a = $1 AND user_b = $2`,
+    [a, b]
+  );
+}
+
+async function dbAreFriends(userA, userB) {
+  const [a, b] = normalizePair(userA, userB);
+  const result = await pool.query(
+    `SELECT 1 FROM friendships WHERE user_a = $1 AND user_b = $2 LIMIT 1`,
+    [a, b]
+  );
+  return result.rowCount > 0;
+}
+
+async function dbGetFriendsFor(username) {
+  const result = await pool.query(
+    `
+    SELECT
+      CASE
+        WHEN user_a = $1 THEN user_b
+        ELSE user_a
+      END AS friend_name
+    FROM friendships
+    WHERE user_a = $1 OR user_b = $1
+    `,
+    [username]
+  );
+
+  return result.rows.map((r) => r.friend_name);
+}
+
+async function dbAddPendingRequest(targetUsername, senderUsername) {
+  await pool.query(
+    `
+    INSERT INTO pending_friend_requests (target_username, sender_username)
+    VALUES ($1, $2)
+    ON CONFLICT (target_username, sender_username) DO NOTHING
+    `,
+    [targetUsername, senderUsername]
+  );
+}
+
+async function dbRemovePendingRequest(targetUsername, senderUsername) {
+  await pool.query(
+    `
+    DELETE FROM pending_friend_requests
+    WHERE target_username = $1 AND sender_username = $2
+    `,
+    [targetUsername, senderUsername]
+  );
+}
+
+async function dbHasPendingRequest(targetUsername, senderUsername) {
+  const result = await pool.query(
+    `
+    SELECT 1
+    FROM pending_friend_requests
+    WHERE target_username = $1 AND sender_username = $2
+    LIMIT 1
+    `,
+    [targetUsername, senderUsername]
+  );
+  return result.rowCount > 0;
+}
+
+async function dbCleanupPendingRequestsWith(username) {
+  await pool.query(
+    `
+    DELETE FROM pending_friend_requests
+    WHERE target_username = $1 OR sender_username = $1
+    `,
+    [username]
+  );
 }
 
 // =========================
@@ -28,12 +159,6 @@ const onlineUsers = new Map();
 
 // username => ISO string
 const lastSeenMap = new Map();
-
-// username => Set(friendName)
-const friendsMap = new Map();
-
-// targetUsername => Set(senderUsername)
-const pendingFriendRequests = new Map();
 
 // socketId => username
 const socketToUsername = new Map();
@@ -60,17 +185,13 @@ function ensureSet(map, key) {
 }
 
 function removeFromWaiting(socketId) {
-  const before = waitingUsers.length;
   waitingUsers = waitingUsers.filter((id) => id !== socketId);
-  const after = waitingUsers.length;
-  if (before !== after) {
-    log("[WAITING] Removed socket from waiting list:", socketId);
-  }
 }
 
 function addSocketForUser(username, socketId) {
   ensureSet(onlineUsers, username).add(socketId);
   socketToUsername.set(socketId, username);
+
   log(
     "[ONLINE] addSocketForUser:",
     username,
@@ -133,23 +254,7 @@ function emitToUser(username, event, data) {
   return true;
 }
 
-function addFriendship(userA, userB) {
-  ensureSet(friendsMap, userA).add(userB);
-  ensureSet(friendsMap, userB).add(userA);
-  log("[FRIENDS] addFriendship:", userA, "<->", userB);
-}
-
-function removeFriendship(userA, userB) {
-  if (friendsMap.has(userA)) friendsMap.get(userA).delete(userB);
-  if (friendsMap.has(userB)) friendsMap.get(userB).delete(userA);
-  log("[FRIENDS] removeFriendship:", userA, "X", userB);
-}
-
-function areFriends(userA, userB) {
-  return friendsMap.has(userA) && friendsMap.get(userA).has(userB);
-}
-
-function sendFriendStatusToSocket(socket, friendName) {
+async function sendFriendStatusToSocket(socket, friendName) {
   const payload = {
     user: friendName,
     online: isUserOnline(friendName),
@@ -160,9 +265,9 @@ function sendFriendStatusToSocket(socket, friendName) {
   socket.emit("update_status", payload);
 }
 
-function notifyFriendsStatusChange(username) {
-  const myFriends = friendsMap.get(username);
-  if (!myFriends) return;
+async function notifyFriendsStatusChange(username) {
+  const myFriends = await dbGetFriendsFor(username);
+  if (!myFriends.length) return;
 
   const payload = {
     user: username,
@@ -216,17 +321,7 @@ function endChatForSocket(socket, options = {}) {
   return partnerId;
 }
 
-function cleanupPendingRequestsWith(username) {
-  pendingFriendRequests.forEach((senders, target) => {
-    if (senders.has(username)) {
-      senders.delete(username);
-      log("[REQUESTS] cleanup pending request from", username, "for target", target);
-    }
-  });
-}
-
-// ✅ المطابقة الآن تمنع لقاء الأصدقاء
-function matchUser(socket) {
+async function matchUser(socket) {
   removeFromWaiting(socket.id);
 
   log("[MATCH] trying to match socket:", socket.id, "user:", socket.username);
@@ -253,11 +348,10 @@ function matchUser(socket) {
     const myName = socket.username || getSafeName(socket);
     const partnerName = partnerSocket.username || getSafeName(partnerSocket);
 
-    // ✅ لا تسمح بمطابقة الأصدقاء
-    if (areFriends(myName, partnerName)) {
+    // لا تسمح بمطابقة الأصدقاء
+    if (await dbAreFriends(myName, partnerName)) {
       log("[MATCH] skipped friend pair:", myName, "<->", partnerName);
 
-      // نعيد الشريك لقائمة الانتظار ليتم إيجاد شخص آخر له لاحقًا
       if (!waitingUsers.includes(partnerSocket.id)) {
         waitingUsers.push(partnerSocket.id);
       }
@@ -303,34 +397,39 @@ function matchUser(socket) {
 io.on("connection", (socket) => {
   log("[CONNECT] New connection:", socket.id);
 
-  socket.on("register_user", (username) => {
-    const safeName = getSafeName(socket, username);
-    socket.username = safeName;
+  socket.on("register_user", async (username) => {
+    try {
+      const safeName = getSafeName(socket, username);
+      socket.username = safeName;
 
-    ensureSet(friendsMap, safeName);
-    ensureSet(pendingFriendRequests, safeName);
+      addSocketForUser(safeName, socket.id);
 
-    addSocketForUser(safeName, socket.id);
+      log("[REGISTER] user:", safeName, "socket:", socket.id);
 
-    log("[REGISTER] user:", safeName, "socket:", socket.id);
-
-    notifyFriendsStatusChange(safeName);
+      await notifyFriendsStatusChange(safeName);
+    } catch (error) {
+      console.error("[REGISTER] error:", error);
+    }
   });
 
-  socket.on("find_partner", () => {
-    if (!socket.username) {
-      socket.username = getSafeName(socket);
-      addSocketForUser(socket.username, socket.id);
+  socket.on("find_partner", async () => {
+    try {
+      if (!socket.username) {
+        socket.username = getSafeName(socket);
+        addSocketForUser(socket.username, socket.id);
+      }
+
+      log("[MATCH] find_partner from:", socket.username, socket.id);
+
+      endChatForSocket(socket, {
+        notifyPartner: "قام الطرف الآخر بإنهاء المحادثة وتخطيك.",
+        notifySelf: "تم إنهاء المحادثة الحالية. جاري البحث عن لاعب جديد...",
+      });
+
+      await matchUser(socket);
+    } catch (error) {
+      console.error("[MATCH] error:", error);
     }
-
-    log("[MATCH] find_partner from:", socket.username, socket.id);
-
-    endChatForSocket(socket, {
-      notifyPartner: "قام الطرف الآخر بإنهاء المحادثة وتخطيك.",
-      notifySelf: "تم إنهاء المحادثة الحالية. جاري البحث عن لاعب جديد...",
-    });
-
-    matchUser(socket);
   });
 
   socket.on("skip_partner", () => {
@@ -387,240 +486,269 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("send_friend_request", (senderName) => {
-    const partnerId = getPartnerSocketId(socket.id);
+  socket.on("send_friend_request", async (senderName) => {
+    try {
+      const partnerId = getPartnerSocketId(socket.id);
 
-    log("[FRIEND REQUEST] send request from:", socket.username, "partnerId:", partnerId);
+      log("[FRIEND REQUEST] send request from:", socket.username, "partnerId:", partnerId);
 
-    if (!partnerId) {
-      socket.emit("system_msg", "لا يوجد لاعب لإرسال طلب صداقة له.");
-      return;
-    }
+      if (!partnerId) {
+        socket.emit("system_msg", "لا يوجد لاعب لإرسال طلب صداقة له.");
+        return;
+      }
 
-    const partnerSocket = io.sockets.sockets.get(partnerId);
-    if (!partnerSocket) {
-      socket.emit("system_msg", "تعذر الوصول إلى الطرف الآخر.");
-      return;
-    }
+      const partnerSocket = io.sockets.sockets.get(partnerId);
+      if (!partnerSocket) {
+        socket.emit("system_msg", "تعذر الوصول إلى الطرف الآخر.");
+        return;
+      }
 
-    const fromName = getSafeName(socket, senderName);
-    const toName = getSafeName(partnerSocket);
+      const fromName = getSafeName(socket, senderName);
+      const toName = getSafeName(partnerSocket);
 
-    if (fromName === toName) return;
+      if (fromName === toName) return;
 
-    if (areFriends(fromName, toName)) {
-      log("[FRIEND REQUEST] already friends:", fromName, toName);
-      socket.emit("system_msg", `أنت و ${toName} أصدقاء بالفعل.`);
-      return;
-    }
+      if (await dbAreFriends(fromName, toName)) {
+        log("[FRIEND REQUEST] already friends:", fromName, toName);
+        socket.emit("system_msg", `أنت و ${toName} أصدقاء بالفعل.`);
+        return;
+      }
 
-    const targetRequests = ensureSet(pendingFriendRequests, toName);
+      if (await dbHasPendingRequest(toName, fromName)) {
+        log("[FRIEND REQUEST] duplicate request:", fromName, "->", toName);
+        socket.emit("friend_request_sent", {
+          to: toName,
+          message: `طلب الصداقة إلى ${toName} مُرسل بالفعل`,
+        });
+        return;
+      }
 
-    if (targetRequests.has(fromName)) {
-      log("[FRIEND REQUEST] duplicate request:", fromName, "->", toName);
+      await dbAddPendingRequest(toName, fromName);
+
+      log("[FRIEND REQUEST] stored request:", fromName, "->", toName);
+
+      emitToUser(toName, "friend_request_received", {
+        from: fromName,
+        message: `${fromName} أرسل لك طلب صداقة`,
+      });
+
       socket.emit("friend_request_sent", {
         to: toName,
-        message: `طلب الصداقة إلى ${toName} مُرسل بالفعل`,
+        message: `تم إرسال طلب الصداقة إلى ${toName}`,
       });
-      return;
+    } catch (error) {
+      console.error("[FRIEND REQUEST] error:", error);
     }
-
-    targetRequests.add(fromName);
-    log("[FRIEND REQUEST] stored request:", fromName, "->", toName);
-
-    emitToUser(toName, "friend_request_received", {
-      from: fromName,
-      message: `${fromName} أرسل لك طلب صداقة`,
-    });
-
-    socket.emit("friend_request_sent", {
-      to: toName,
-      message: `تم إرسال طلب الصداقة إلى ${toName}`,
-    });
   });
 
-  socket.on("respond_friend_request", (data) => {
-    const myName = getSafeName(socket);
-    const fromName =
-      data && typeof data.from === "string" ? data.from.trim() : "";
-    const accepted = !!(data && data.accepted);
+  socket.on("respond_friend_request", async (data) => {
+    try {
+      const myName = getSafeName(socket);
+      const fromName =
+        data && typeof data.from === "string" ? data.from.trim() : "";
+      const accepted = !!(data && data.accepted);
 
-    log(
-      "[FRIEND REQUEST] response:",
-      "from target:",
-      myName,
-      "original sender:",
-      fromName,
-      "accepted:",
-      accepted
-    );
+      log(
+        "[FRIEND REQUEST] response:",
+        "from target:",
+        myName,
+        "original sender:",
+        fromName,
+        "accepted:",
+        accepted
+      );
 
-    if (!fromName) return;
+      if (!fromName) return;
 
-    const myPending = ensureSet(pendingFriendRequests, myName);
+      if (!(await dbHasPendingRequest(myName, fromName))) {
+        log("[FRIEND REQUEST] request missing for:", fromName, "->", myName);
+        socket.emit("system_msg", "هذا الطلب لم يعد موجودًا.");
+        return;
+      }
 
-    if (!myPending.has(fromName)) {
-      log("[FRIEND REQUEST] request missing for:", fromName, "->", myName);
-      socket.emit("system_msg", "هذا الطلب لم يعد موجودًا.");
-      return;
+      await dbRemovePendingRequest(myName, fromName);
+
+      if (accepted) {
+        await dbAddFriendship(myName, fromName);
+
+        emitToUser(myName, "friend_added_successfully", fromName);
+        emitToUser(fromName, "friend_added_successfully", myName);
+
+        emitToUser(myName, "friend_request_response", {
+          from: fromName,
+          accepted: true,
+          message: `أنت الآن صديق لـ ${fromName}`,
+        });
+
+        emitToUser(fromName, "friend_request_response", {
+          from: myName,
+          accepted: true,
+          message: `تم قبول طلب صداقتك من ${myName}`,
+        });
+
+        emitToUser(myName, "update_status", {
+          user: fromName,
+          online: isUserOnline(fromName),
+          lastSeen: lastSeenMap.get(fromName) || "غير معروف",
+        });
+
+        emitToUser(fromName, "update_status", {
+          user: myName,
+          online: isUserOnline(myName),
+          lastSeen: lastSeenMap.get(myName) || "غير معروف",
+        });
+      } else {
+        emitToUser(myName, "friend_request_response", {
+          from: fromName,
+          accepted: false,
+          message: `تم رفض طلب الصداقة من ${fromName}`,
+        });
+
+        emitToUser(fromName, "friend_request_response", {
+          from: myName,
+          accepted: false,
+          message: `${myName} رفض طلب الصداقة`,
+        });
+      }
+    } catch (error) {
+      console.error("[FRIEND REQUEST RESPONSE] error:", error);
     }
+  });
 
-    myPending.delete(fromName);
+  socket.on("get_friends_status", async (friendsList) => {
+    try {
+      log("[STATUS] get_friends_status from:", socket.username, friendsList);
 
-    if (accepted) {
-      addFriendship(myName, fromName);
+      if (!Array.isArray(friendsList)) return;
 
-      emitToUser(myName, "friend_added_successfully", fromName);
-      emitToUser(fromName, "friend_added_successfully", myName);
+      for (const friendName of friendsList) {
+        if (typeof friendName !== "string" || !friendName.trim()) continue;
+        await sendFriendStatusToSocket(socket, friendName.trim());
+      }
+    } catch (error) {
+      console.error("[STATUS] error:", error);
+    }
+  });
 
-      emitToUser(myName, "friend_request_response", {
-        from: fromName,
-        accepted: true,
-        message: `أنت الآن صديق لـ ${fromName}`,
+  socket.on("private_message", async (data) => {
+    try {
+      if (!data || typeof data !== "object") return;
+
+      const to = typeof data.to === "string" ? data.to.trim() : "";
+      const from =
+        typeof data.from === "string" && data.from.trim()
+          ? data.from.trim()
+          : getSafeName(socket);
+      const text = typeof data.text === "string" ? data.text.trim() : "";
+
+      log("[PRIVATE MESSAGE] incoming:", {
+        from,
+        to,
+        text,
+        fromSocket: socket.id,
+        targetOnline: isUserOnline(to),
+        targetSocketsCount: onlineUsers.has(to) ? onlineUsers.get(to).size : 0,
       });
 
-      emitToUser(fromName, "friend_request_response", {
+      if (!to || !text) return;
+
+      if (!(await dbAreFriends(from, to))) {
+        log("[PRIVATE MESSAGE] blocked, users are not friends:", from, to);
+        socket.emit("system_msg", "لا يمكنك إرسال رسالة خاصة قبل إضافة المستخدم كصديق.");
+        return;
+      }
+
+      const payload = {
+        from,
+        text,
+        time: new Date().toISOString(),
+      };
+
+      const delivered = emitToUser(to, "private_message_received", payload);
+
+      log("[PRIVATE MESSAGE] delivered:", delivered, "payload:", payload);
+
+      if (!delivered) {
+        socket.emit("system_msg", `${to} غير متصل الآن.`);
+      }
+    } catch (error) {
+      console.error("[PRIVATE MESSAGE] error:", error);
+    }
+  });
+
+  socket.on("delete_friend", async (friendNameRaw) => {
+    try {
+      const myName = getSafeName(socket);
+      const friendName =
+        typeof friendNameRaw === "string" ? friendNameRaw.trim() : "";
+
+      log("[FRIENDS] delete_friend request:", myName, "->", friendName);
+
+      if (!friendName) return;
+
+      if (!(await dbAreFriends(myName, friendName))) {
+        socket.emit("friend_deleted_successfully", {
+          name: friendName,
+          message: `${friendName} غير موجود أصلًا في قائمة أصدقائك`,
+        });
+        return;
+      }
+
+      await dbRemoveFriendship(myName, friendName);
+
+      emitToUser(myName, "friend_deleted_successfully", {
+        name: friendName,
+        message: `تم حذف ${friendName} من قائمة الأصدقاء`,
+      });
+
+      emitToUser(friendName, "friend_deleted_me", {
         from: myName,
-        accepted: true,
-        message: `تم قبول طلب صداقتك من ${myName}`,
+        message: `${myName} حذفك من قائمة أصدقائه`,
       });
 
-      emitToUser(myName, "update_status", {
-        user: fromName,
-        online: isUserOnline(fromName),
-        lastSeen: lastSeenMap.get(fromName) || "غير معروف",
-      });
-
-      emitToUser(fromName, "update_status", {
+      emitToUser(friendName, "update_status", {
         user: myName,
         online: isUserOnline(myName),
         lastSeen: lastSeenMap.get(myName) || "غير معروف",
       });
-    } else {
-      emitToUser(myName, "friend_request_response", {
-        from: fromName,
-        accepted: false,
-        message: `تم رفض طلب الصداقة من ${fromName}`,
-      });
-
-      emitToUser(fromName, "friend_request_response", {
-        from: myName,
-        accepted: false,
-        message: `${myName} رفض طلب الصداقة`,
-      });
+    } catch (error) {
+      console.error("[DELETE FRIEND] error:", error);
     }
   });
 
-  socket.on("get_friends_status", (friendsList) => {
-    log("[STATUS] get_friends_status from:", socket.username, friendsList);
+  socket.on("disconnect", async () => {
+    try {
+      log("[DISCONNECT] socket:", socket.id, "username:", socket.username);
 
-    if (!Array.isArray(friendsList)) return;
+      removeFromWaiting(socket.id);
 
-    friendsList.forEach((friendName) => {
-      if (typeof friendName !== "string" || !friendName.trim()) return;
-      sendFriendStatusToSocket(socket, friendName.trim());
-    });
-  });
+      const partnerId = clearChatForSocket(socket.id);
+      if (partnerId) {
+        io.to(partnerId).emit(
+          "system_msg",
+          "انقطع اتصال الطرف الآخر. تم إنهاء المحادثة."
+        );
+        io.to(partnerId).emit("stop_typing");
+        log("[DISCONNECT] chat cleared with partner:", partnerId);
+      }
 
-  socket.on("private_message", (data) => {
-    if (!data || typeof data !== "object") return;
-
-    const to = typeof data.to === "string" ? data.to.trim() : "";
-    const from =
-      typeof data.from === "string" && data.from.trim()
-        ? data.from.trim()
-        : getSafeName(socket);
-    const text = typeof data.text === "string" ? data.text.trim() : "";
-
-    log("[PRIVATE MESSAGE] incoming:", {
-      from,
-      to,
-      text,
-      fromSocket: socket.id,
-      targetOnline: isUserOnline(to),
-      targetSocketsCount: onlineUsers.has(to) ? onlineUsers.get(to).size : 0,
-      areFriends: areFriends(from, to),
-    });
-
-    if (!to || !text) return;
-
-    if (!areFriends(from, to)) {
-      log("[PRIVATE MESSAGE] blocked, users are not friends:", from, to);
-      socket.emit("system_msg", "لا يمكنك إرسال رسالة خاصة قبل إضافة المستخدم كصديق.");
-      return;
-    }
-
-    const payload = {
-      from,
-      text,
-      time: new Date().toISOString(),
-    };
-
-    const delivered = emitToUser(to, "private_message_received", payload);
-
-    log("[PRIVATE MESSAGE] delivered:", delivered, "payload:", payload);
-
-    if (!delivered) {
-      socket.emit("system_msg", `${to} غير متصل الآن.`);
-    }
-  });
-
-  socket.on("delete_friend", (friendNameRaw) => {
-    const myName = getSafeName(socket);
-    const friendName =
-      typeof friendNameRaw === "string" ? friendNameRaw.trim() : "";
-
-    log("[FRIENDS] delete_friend request:", myName, "->", friendName);
-
-    if (!friendName) return;
-
-    if (!areFriends(myName, friendName)) {
-      socket.emit("friend_deleted_successfully", {
-        name: friendName,
-        message: `${friendName} غير موجود أصلًا في قائمة أصدقائك`,
-      });
-      return;
-    }
-
-    removeFriendship(myName, friendName);
-
-    emitToUser(myName, "friend_deleted_successfully", {
-      name: friendName,
-      message: `تم حذف ${friendName} من قائمة الأصدقاء`,
-    });
-
-    emitToUser(friendName, "friend_deleted_me", {
-      from: myName,
-      message: `${myName} حذفك من قائمة أصدقائه`,
-    });
-
-    emitToUser(friendName, "update_status", {
-      user: myName,
-      online: isUserOnline(myName),
-      lastSeen: lastSeenMap.get(myName) || "غير معروف",
-    });
-  });
-
-  socket.on("disconnect", () => {
-    log("[DISCONNECT] socket:", socket.id, "username:", socket.username);
-
-    removeFromWaiting(socket.id);
-
-    const partnerId = clearChatForSocket(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit(
-        "system_msg",
-        "انقطع اتصال الطرف الآخر. تم إنهاء المحادثة."
-      );
-      io.to(partnerId).emit("stop_typing");
-      log("[DISCONNECT] chat cleared with partner:", partnerId);
-    }
-
-    const username = socketToUsername.get(socket.id) || socket.username;
-    if (username) {
-      removeSocketForUser(username, socket.id);
-      cleanupPendingRequestsWith(username);
-      notifyFriendsStatusChange(username);
+      const username = socketToUsername.get(socket.id) || socket.username;
+      if (username) {
+        removeSocketForUser(username, socket.id);
+        await dbCleanupPendingRequestsWith(username);
+        await notifyFriendsStatusChange(username);
+      }
+    } catch (error) {
+      console.error("[DISCONNECT] error:", error);
     }
   });
 });
+
+initDb()
+  .then(() => {
+    log("[DB] ready");
+  })
+  .catch((error) => {
+    console.error("[DB] initialization failed:", error);
+    process.exit(1);
+  });
