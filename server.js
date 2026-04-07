@@ -1,55 +1,81 @@
 const io = require("socket.io")(process.env.PORT || 3000, {
-  cors: { origin: "*" }
+  cors: { origin: "*" },
 });
 
-// قائمة المستخدمين الذين ينتظرون شريكاً
+// المستخدمون المنتظرون للدردشة العشوائية
 let waitingUsers = [];
-// قاموس لربط كل مستخدم بشريكه (لسرعة الوصول)
-let activeChats = new Map();
+
+// ربط كل مستخدم بشريكه في الدردشة العشوائية
+const activeChats = new Map();
+
+// تخزين المستخدمين المتصلين بالاسم
+// username => socket.id
+const onlineUsers = new Map();
+
+// آخر ظهور للمستخدمين
+// username => ISO date string
+const lastSeenMap = new Map();
 
 io.on("connection", (socket) => {
   console.log("New connection:", socket.id);
 
-  // 1. تسجيل المستخدم
+  // 1) تسجيل المستخدم
   socket.on("register_user", (username) => {
-    socket.username = username || "مستخدم مجهول";
-    console.log(`User registered: ${socket.username}`);
+    const safeName =
+      typeof username === "string" && username.trim()
+        ? username.trim()
+        : `مستخدم_${socket.id.slice(0, 5)}`;
+
+    socket.username = safeName;
+    onlineUsers.set(safeName, socket.id);
+
+    console.log(`User registered: ${safeName} -> ${socket.id}`);
   });
 
-  // 2. نظام البحث عن شريك (مع ميزة التخطي)
+  // 2) البحث عن شريك / التخطي
   socket.on("find_partner", () => {
-    // أ: إذا كان المستخدم في محادثة حالية، أخبر الطرف الآخر بالتخطّي
+    // إذا كان في محادثة حالية، افصلها أولاً
     const currentPartnerId = activeChats.get(socket.id);
     if (currentPartnerId) {
       const partnerSocket = io.sockets.sockets.get(currentPartnerId);
+
       if (partnerSocket) {
-        partnerSocket.emit("system_msg", "قام الطرف الآخر بإنهاء المحادثة وتخطيك.");
+        partnerSocket.emit(
+          "system_msg",
+          "قام الطرف الآخر بإنهاء المحادثة وتخطيك."
+        );
+
         activeChats.delete(partnerSocket.id);
-        // إعادة الطرف الآخر لقائمة الانتظار تلقائياً ليجد شخصاً جديداً
+
         if (!waitingUsers.includes(partnerSocket.id)) {
-            waitingUsers.push(partnerSocket.id);
-            partnerSocket.emit("system_msg", "جاري البحث عن صديق جديد لك...");
+          waitingUsers.push(partnerSocket.id);
+          partnerSocket.emit("system_msg", "جاري البحث عن صديق جديد لك...");
         }
       }
+
       activeChats.delete(socket.id);
     }
 
-    // ب: إزالة المستخدم من قائمة الانتظار إذا كان موجوداً مسبقاً (لتجنب التكرار)
-    waitingUsers = waitingUsers.filter(id => id !== socket.id);
+    // إزالة المستخدم من الانتظار إن كان موجودًا
+    waitingUsers = waitingUsers.filter((id) => id !== socket.id);
 
-    // ج: محاولة إيجاد شريك جديد
+    // إيجاد شريك
     if (waitingUsers.length > 0) {
       const partnerId = waitingUsers.shift();
       const partnerSocket = io.sockets.sockets.get(partnerId);
 
       if (partnerSocket && partnerSocket.id !== socket.id) {
-        // إنشاء الرابط في الخريطة (Map)
         activeChats.set(socket.id, partnerId);
         activeChats.set(partnerId, socket.id);
 
-        // إرسال إشعارات النجاح
-        socket.emit("system_msg", `تم العثور على صديق: ${partnerSocket.username}`);
-        partnerSocket.emit("system_msg", `تم العثور على صديق: ${socket.username}`);
+        socket.emit(
+          "system_msg",
+          `تم العثور على صديق: ${partnerSocket.username || "مستخدم مجهول"}`
+        );
+        partnerSocket.emit(
+          "system_msg",
+          `تم العثور على صديق: ${socket.username || "مستخدم مجهول"}`
+        );
       } else {
         waitingUsers.push(socket.id);
         socket.emit("system_msg", "جاري البحث عن صديق...");
@@ -60,47 +86,143 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 3. تبادل الرسائل (حل مشكلة عدم وصول الكلام)
+  // 3) رسائل الدردشة العشوائية
   socket.on("message", (msg) => {
     const partnerId = activeChats.get(socket.id);
-    if (partnerId) {
-      // إرسال الرسالة للطرف الآخر فقط
-      io.to(partnerId).emit("message", msg);
-    } else {
+
+    if (!partnerId) {
       socket.emit("system_msg", "لا يوجد طرف آخر لاستلام رسالتك.");
+      return;
+    }
+
+    io.to(partnerId).emit("message", msg);
+  });
+
+  // 4) إرسال صورة في الدردشة العشوائية
+  socket.on("image", (base64Image) => {
+    const partnerId = activeChats.get(socket.id);
+
+    if (!partnerId) {
+      socket.emit("system_msg", "لا يوجد طرف آخر لاستلام الصورة.");
+      return;
+    }
+
+    io.to(partnerId).emit("image", base64Image);
+  });
+
+  // 5) حالة الكتابة في الدردشة العشوائية
+  socket.on("typing", () => {
+    const partnerId = activeChats.get(socket.id);
+    if (partnerId) {
+      io.to(partnerId).emit("typing");
     }
   });
 
-  // 4. طلبات الصداقة (إرسال واستقبال وقبول)
-  socket.on("send_friend_request", (senderName) => {
+  socket.on("stop_typing", () => {
     const partnerId = activeChats.get(socket.id);
     if (partnerId) {
-      io.to(partnerId).emit("friend_request_received", { name: senderName });
+      io.to(partnerId).emit("stop_typing");
     }
+  });
+
+  // 6) طلبات الصداقة
+  socket.on("send_friend_request", (senderName) => {
+    const partnerId = activeChats.get(socket.id);
+
+    if (!partnerId) return;
+
+    io.to(partnerId).emit("friend_request_received", {
+      name: senderName || socket.username || "مستخدم مجهول",
+    });
   });
 
   socket.on("accept_friend", (data) => {
     const partnerId = activeChats.get(socket.id);
-    if (partnerId) {
-      // إبلاغ الطرفين بنجاح العملية
-      socket.emit("friend_added_successfully", data.partnerName); // للذي قَبِل
-      io.to(partnerId).emit("friend_added_successfully", data.myName); // للذي أرْسَل
+
+    if (!partnerId) return;
+
+    const myName =
+      data && typeof data.myName === "string" && data.myName.trim()
+        ? data.myName.trim()
+        : socket.username || "مستخدم مجهول";
+
+    const partnerName =
+      data && typeof data.partnerName === "string" && data.partnerName.trim()
+        ? data.partnerName.trim()
+        : "مستخدم مجهول";
+
+    socket.emit("friend_added_successfully", partnerName);
+    io.to(partnerId).emit("friend_added_successfully", myName);
+  });
+
+  // 7) الرسائل الخاصة بين الأصدقاء
+  socket.on("private_message", (data) => {
+    if (!data || typeof data !== "object") return;
+
+    const to = typeof data.to === "string" ? data.to.trim() : "";
+    const from =
+      typeof data.from === "string" && data.from.trim()
+        ? data.from.trim()
+        : socket.username || "مستخدم مجهول";
+    const text = typeof data.text === "string" ? data.text : "";
+
+    if (!to || !text.trim()) return;
+
+    const targetSocketId = onlineUsers.get(to);
+
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("private_message_received", {
+        from,
+        text,
+      });
     }
   });
 
-  // 5. عند قطع الاتصال (إغلاق التطبيق أو ضعف الإنترنت)
+  // 8) جلب حالات الأصدقاء
+  socket.on("get_friends_status", (friendsList) => {
+    if (!Array.isArray(friendsList)) return;
+
+    friendsList.forEach((friendName) => {
+      if (typeof friendName !== "string" || !friendName.trim()) return;
+
+      const online = onlineUsers.has(friendName);
+      const lastSeen = lastSeenMap.get(friendName) || "غير معروف";
+
+      socket.emit("update_status", {
+        user: friendName,
+        online,
+        lastSeen,
+      });
+    });
+  });
+
+  // 9) قطع الاتصال
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
+
+    // إزالة من قائمة الانتظار
+    waitingUsers = waitingUsers.filter((id) => id !== socket.id);
+
+    // إنهاء أي دردشة عشوائية حالية
     const partnerId = activeChats.get(socket.id);
     if (partnerId) {
       const partnerSocket = io.sockets.sockets.get(partnerId);
+
       if (partnerSocket) {
-        partnerSocket.emit("system_msg", "انقطع الاتصال بالطرف الآخر (غادر التطبيق).");
+        partnerSocket.emit(
+          "system_msg",
+          "انقطع الاتصال بالطرف الآخر (غادر التطبيق)."
+        );
         activeChats.delete(partnerId);
       }
     }
-    // إزالته من قائمة الانتظار
-    waitingUsers = waitingUsers.filter(id => id !== socket.id);
+
     activeChats.delete(socket.id);
+
+    // تحديث حالة المستخدم
+    if (socket.username) {
+      onlineUsers.delete(socket.username);
+      lastSeenMap.set(socket.username, new Date().toISOString());
+    }
   });
 });
