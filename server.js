@@ -6,31 +6,23 @@ const io = require("socket.io")(process.env.PORT || 3000, {
 // التخزين داخل الذاكرة
 // =========================
 
-// المستخدمون المنتظرون للمطابقة العشوائية
 let waitingUsers = [];
+const activeChats = new Map(); // socketId => partnerSocketId
 
-// ربط كل socket بشريكه في الدردشة العشوائية
-// socketId => partnerSocketId
-const activeChats = new Map();
-
-// المستخدمون المتصلون الآن
-// username => socketId
+// username => Set(socketId)
 const onlineUsers = new Map();
 
-// آخر ظهور
 // username => ISO string
 const lastSeenMap = new Map();
 
-// قائمة الأصدقاء
 // username => Set(friendName)
 const friendsMap = new Map();
 
-// طلبات الصداقة المعلقة
 // targetUsername => Set(senderUsername)
 const pendingFriendRequests = new Map();
 
 // =========================
-// دوال مساعدة
+// Helpers
 // =========================
 
 function getSafeName(socket, providedName) {
@@ -43,95 +35,114 @@ function getSafeName(socket, providedName) {
   return `مستخدم_${socket.id.slice(0, 5)}`;
 }
 
-function ensureUserSet(map, username) {
-  if (!map.has(username)) {
-    map.set(username, new Set());
+function ensureSet(map, key) {
+  if (!map.has(key)) {
+    map.set(key, new Set());
   }
-  return map.get(username);
+  return map.get(key);
 }
 
 function removeFromWaiting(socketId) {
   waitingUsers = waitingUsers.filter((id) => id !== socketId);
 }
 
-function endActiveChatFor(socket, reasonForPartner = null, reasonForSelf = null) {
-  const partnerId = activeChats.get(socket.id);
-
-  if (!partnerId) {
-    if (reasonForSelf) {
-      socket.emit("system_msg", reasonForSelf);
-    }
-    return null;
-  }
-
-  const partnerSocket = io.sockets.sockets.get(partnerId);
-
-  activeChats.delete(socket.id);
-  activeChats.delete(partnerId);
-
-  if (partnerSocket && reasonForPartner) {
-    partnerSocket.emit("system_msg", reasonForPartner);
-    partnerSocket.emit("stop_typing");
-  }
-
-  socket.emit("stop_typing");
-
-  if (reasonForSelf) {
-    socket.emit("system_msg", reasonForSelf);
-  }
-
-  return partnerSocket || null;
+function addSocketForUser(username, socketId) {
+  ensureSet(onlineUsers, username).add(socketId);
 }
 
-function sendFriendStatusTo(socket, friendName) {
-  const online = onlineUsers.has(friendName);
-  const lastSeen = lastSeenMap.get(friendName) || "غير معروف";
+function removeSocketForUser(username, socketId) {
+  if (!onlineUsers.has(username)) return;
 
+  const set = onlineUsers.get(username);
+  set.delete(socketId);
+
+  if (set.size === 0) {
+    onlineUsers.delete(username);
+    lastSeenMap.set(username, new Date().toISOString());
+  }
+}
+
+function emitToUser(username, event, data) {
+  const sockets = onlineUsers.get(username);
+  if (!sockets) return false;
+
+  sockets.forEach((socketId) => {
+    io.to(socketId).emit(event, data);
+  });
+
+  return true;
+}
+
+function isUserOnline(username) {
+  return onlineUsers.has(username) && onlineUsers.get(username).size > 0;
+}
+
+function sendFriendStatusToSocket(socket, friendName) {
   socket.emit("update_status", {
     user: friendName,
-    online,
-    lastSeen,
+    online: isUserOnline(friendName),
+    lastSeen: lastSeenMap.get(friendName) || "غير معروف",
   });
 }
 
-function notifyFriendStatusChange(username) {
+function notifyFriendsStatusChange(username) {
   const myFriends = friendsMap.get(username);
   if (!myFriends) return;
 
   myFriends.forEach((friendName) => {
-    const friendSocketId = onlineUsers.get(friendName);
-    if (!friendSocketId) return;
-
-    io.to(friendSocketId).emit("update_status", {
+    emitToUser(friendName, "update_status", {
       user: username,
-      online: onlineUsers.has(username),
+      online: isUserOnline(username),
       lastSeen: lastSeenMap.get(username) || "غير معروف",
     });
   });
 }
 
 function addFriendship(userA, userB) {
-  ensureUserSet(friendsMap, userA).add(userB);
-  ensureUserSet(friendsMap, userB).add(userA);
+  ensureSet(friendsMap, userA).add(userB);
+  ensureSet(friendsMap, userB).add(userA);
 }
 
 function removeFriendship(userA, userB) {
-  if (friendsMap.has(userA)) {
-    friendsMap.get(userA).delete(userB);
-  }
-  if (friendsMap.has(userB)) {
-    friendsMap.get(userB).delete(userA);
-  }
+  if (friendsMap.has(userA)) friendsMap.get(userA).delete(userB);
+  if (friendsMap.has(userB)) friendsMap.get(userB).delete(userA);
 }
 
-function getPartnerSocket(socket) {
-  const partnerId = activeChats.get(socket.id);
-  if (!partnerId) return null;
-  return io.sockets.sockets.get(partnerId) || null;
+function getPartnerSocketId(socketId) {
+  return activeChats.get(socketId) || null;
+}
+
+function endChatForSocket(socket, options = {}) {
+  const {
+    notifyPartner = null,
+    notifySelf = null,
+  } = options;
+
+  const partnerId = getPartnerSocketId(socket.id);
+  if (!partnerId) {
+    if (notifySelf) socket.emit("system_msg", notifySelf);
+    return null;
+  }
+
+  activeChats.delete(socket.id);
+  activeChats.delete(partnerId);
+
+  if (notifyPartner) {
+    io.to(partnerId).emit("system_msg", notifyPartner);
+    io.to(partnerId).emit("stop_typing");
+  }
+
+  socket.emit("stop_typing");
+
+  if (notifySelf) {
+    socket.emit("system_msg", notifySelf);
+  }
+
+  return partnerId;
 }
 
 // =========================
-// socket.io
+// Socket.io
 // =========================
 
 io.on("connection", (socket) => {
@@ -140,49 +151,31 @@ io.on("connection", (socket) => {
   // 1) تسجيل المستخدم
   socket.on("register_user", (username) => {
     const safeName = getSafeName(socket, username);
-
-    // إذا كان الاسم متصل سابقًا من جهاز آخر، نستبدله بآخر اتصال
-    const oldSocketId = onlineUsers.get(safeName);
-    if (oldSocketId && oldSocketId !== socket.id) {
-      const oldSocket = io.sockets.sockets.get(oldSocketId);
-      if (oldSocket) {
-        oldSocket.emit("system_msg", "تم تسجيل الدخول من جهاز آخر.");
-        oldSocket.disconnect(true);
-      }
-    }
-
     socket.username = safeName;
-    onlineUsers.set(safeName, socket.id);
 
-    ensureUserSet(friendsMap, safeName);
-    ensureUserSet(pendingFriendRequests, safeName);
+    addSocketForUser(safeName, socket.id);
+    ensureSet(friendsMap, safeName);
+    ensureSet(pendingFriendRequests, safeName);
 
     console.log(`User registered: ${safeName} -> ${socket.id}`);
 
-    // تحديث أصدقائه أنه أصبح متصلاً
-    notifyFriendStatusChange(safeName);
+    notifyFriendsStatusChange(safeName);
   });
 
-  // 2) البحث عن شريك / بدء المطابقة
+  // 2) بدء المطابقة
   socket.on("find_partner", () => {
     if (!socket.username) {
       socket.username = getSafeName(socket);
-      onlineUsers.set(socket.username, socket.id);
+      addSocketForUser(socket.username, socket.id);
     }
 
-    // إذا كان في محادثة حالية، أنهها للطرفين
-    const previousPartner = endActiveChatFor(
-      socket,
-      "قام الطرف الآخر بإنهاء المحادثة وتخطيك.",
-      "تم إنهاء المحادثة الحالية. جاري البحث عن لاعب جديد..."
-    );
-
-    // الطرف الآخر لا نعيده تلقائيًا للانتظار إلا إذا أردت ذلك لاحقًا
-    // الآن التخطي يعني الخروج من المحادثة الحالية فقط للطرفين
+    endChatForSocket(socket, {
+      notifyPartner: "قام الطرف الآخر بإنهاء المحادثة وتخطيك.",
+      notifySelf: "تم إنهاء المحادثة الحالية. جاري البحث عن لاعب جديد...",
+    });
 
     removeFromWaiting(socket.id);
 
-    // ابحث عن شريك صالح
     while (waitingUsers.length > 0) {
       const partnerId = waitingUsers.shift();
       const partnerSocket = io.sockets.sockets.get(partnerId);
@@ -202,7 +195,6 @@ io.on("connection", (socket) => {
         "system_msg",
         `تم العثور على صديق: ${socket.username || "مستخدم مجهول"}`
       );
-
       return;
     }
 
@@ -212,20 +204,18 @@ io.on("connection", (socket) => {
 
   // 3) التخطي
   socket.on("skip_partner", () => {
-    const partnerSocket = endActiveChatFor(
-      socket,
-      "قام الطرف الآخر بتخطيك. تم إنهاء المحادثة.",
-      "تم التخطي والخروج من المحادثة."
-    );
+    endChatForSocket(socket, {
+      notifyPartner: "قام الطرف الآخر بتخطيك. تم إنهاء المحادثة.",
+      notifySelf: "تم التخطي والخروج من المحادثة.",
+    });
 
     removeFromWaiting(socket.id);
     socket.emit("system_msg", "تم التخطي. اضغط بحث عن لاعب لبدء مطابقة جديدة.");
   });
 
-  // 4) الرسائل النصية في الدردشة العشوائية
+  // 4) رسالة نصية
   socket.on("message", (msg) => {
-    const partnerId = activeChats.get(socket.id);
-
+    const partnerId = getPartnerSocketId(socket.id);
     if (!partnerId) {
       socket.emit("system_msg", "لا يوجد لاعب متصل معك حاليًا.");
       return;
@@ -234,10 +224,9 @@ io.on("connection", (socket) => {
     io.to(partnerId).emit("message", msg);
   });
 
-  // 5) الصور في الدردشة العشوائية
+  // 5) صورة
   socket.on("image", (base64Image) => {
-    const partnerId = activeChats.get(socket.id);
-
+    const partnerId = getPartnerSocketId(socket.id);
     if (!partnerId) {
       socket.emit("system_msg", "لا يوجد لاعب متصل معك حاليًا.");
       return;
@@ -246,46 +235,41 @@ io.on("connection", (socket) => {
     io.to(partnerId).emit("image", base64Image);
   });
 
-  // 6) حالة الكتابة
+  // 6) typing
   socket.on("typing", () => {
-    const partnerId = activeChats.get(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("typing");
-    }
+    const partnerId = getPartnerSocketId(socket.id);
+    if (partnerId) io.to(partnerId).emit("typing");
   });
 
   socket.on("stop_typing", () => {
-    const partnerId = activeChats.get(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("stop_typing");
-    }
+    const partnerId = getPartnerSocketId(socket.id);
+    if (partnerId) io.to(partnerId).emit("stop_typing");
   });
 
-  // 7) إرسال طلب صداقة أثناء الدردشة العشوائية
+  // 7) طلب صداقة
   socket.on("send_friend_request", (senderName) => {
-    const partnerSocket = getPartnerSocket(socket);
-
-    if (!partnerSocket) {
+    const partnerId = getPartnerSocketId(socket.id);
+    if (!partnerId) {
       socket.emit("system_msg", "لا يوجد لاعب لإرسال طلب صداقة له.");
       return;
     }
+
+    const partnerSocket = io.sockets.sockets.get(partnerId);
+    if (!partnerSocket) return;
 
     const fromName = getSafeName(socket, senderName);
     const toName = getSafeName(partnerSocket);
 
     if (fromName === toName) return;
 
-    // إذا كانوا أصدقاء أصلًا
     if (friendsMap.has(fromName) && friendsMap.get(fromName).has(toName)) {
       socket.emit("system_msg", `أنت و ${toName} أصدقاء بالفعل.`);
       return;
     }
 
-    // سجل الطلب كمعلق
-    ensureUserSet(pendingFriendRequests, toName).add(fromName);
+    ensureSet(pendingFriendRequests, toName).add(fromName);
 
-    // أرسل إشعار للطرف الآخر
-    partnerSocket.emit("friend_request_received", {
+    emitToUser(toName, "friend_request_received", {
       from: fromName,
       message: `${fromName} أرسل لك طلب صداقة`,
     });
@@ -296,7 +280,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // 8) الرد على طلب الصداقة: قبول / رفض
+  // 8) قبول / رفض طلب الصداقة
   socket.on("respond_friend_request", (data) => {
     const myName = getSafeName(socket);
     const fromName =
@@ -305,7 +289,7 @@ io.on("connection", (socket) => {
 
     if (!fromName) return;
 
-    const myPending = ensureUserSet(pendingFriendRequests, myName);
+    const myPending = ensureSet(pendingFriendRequests, myName);
 
     if (!myPending.has(fromName)) {
       socket.emit("system_msg", "هذا الطلب لم يعد موجودًا.");
@@ -314,76 +298,61 @@ io.on("connection", (socket) => {
 
     myPending.delete(fromName);
 
-    const senderSocketId = onlineUsers.get(fromName);
-
     if (accepted) {
       addFriendship(myName, fromName);
 
-      socket.emit("friend_added_successfully", fromName);
+      emitToUser(myName, "friend_added_successfully", fromName);
+      emitToUser(fromName, "friend_added_successfully", myName);
 
-      if (senderSocketId) {
-        io.to(senderSocketId).emit("friend_added_successfully", myName);
-      }
-
-      socket.emit("friend_request_response", {
+      emitToUser(myName, "friend_request_response", {
         from: fromName,
         accepted: true,
         message: `أنت الآن صديق لـ ${fromName}`,
       });
 
-      if (senderSocketId) {
-        io.to(senderSocketId).emit("friend_request_response", {
-          from: myName,
-          accepted: true,
-          message: `تم قبول طلب صداقتك من ${myName}`,
-        });
-      }
+      emitToUser(fromName, "friend_request_response", {
+        from: myName,
+        accepted: true,
+        message: `تم قبول طلب صداقتك من ${myName}`,
+      });
 
-      // تحديث الحالة للطرفين إذا كانوا متصلين
-      sendFriendStatusTo(socket, fromName);
-      if (senderSocketId) {
-        io.to(senderSocketId).emit("update_status", {
-          user: myName,
-          online: true,
-          lastSeen: lastSeenMap.get(myName) || "غير معروف",
-        });
-      }
+      emitToUser(myName, "update_status", {
+        user: fromName,
+        online: isUserOnline(fromName),
+        lastSeen: lastSeenMap.get(fromName) || "غير معروف",
+      });
+
+      emitToUser(fromName, "update_status", {
+        user: myName,
+        online: isUserOnline(myName),
+        lastSeen: lastSeenMap.get(myName) || "غير معروف",
+      });
     } else {
-      socket.emit("friend_request_response", {
+      emitToUser(myName, "friend_request_response", {
         from: fromName,
         accepted: false,
         message: `تم رفض طلب الصداقة من ${fromName}`,
       });
 
-      if (senderSocketId) {
-        io.to(senderSocketId).emit("friend_request_response", {
-          from: myName,
-          accepted: false,
-          message: `${myName} رفض طلب الصداقة`,
-        });
-      }
+      emitToUser(fromName, "friend_request_response", {
+        from: myName,
+        accepted: false,
+        message: `${myName} رفض طلب الصداقة`,
+      });
     }
   });
 
-  // 9) جلب قائمة الأصدقاء
-  socket.on("get_friends_list", () => {
-    const myName = getSafeName(socket);
-    const list = Array.from(friendsMap.get(myName) || []);
-
-    socket.emit("friends_list", list);
-  });
-
-  // 10) جلب حالات الأصدقاء
+  // 9) حالات الأصدقاء
   socket.on("get_friends_status", (friendsList) => {
     if (!Array.isArray(friendsList)) return;
 
     friendsList.forEach((friendName) => {
       if (typeof friendName !== "string" || !friendName.trim()) return;
-      sendFriendStatusTo(socket, friendName.trim());
+      sendFriendStatusToSocket(socket, friendName.trim());
     });
   });
 
-  // 11) الرسائل الخاصة بين الأصدقاء
+  // 10) الرسائل الخاصة
   socket.on("private_message", (data) => {
     if (!data || typeof data !== "object") return;
 
@@ -396,25 +365,23 @@ io.on("connection", (socket) => {
 
     if (!to || !text) return;
 
-    // اسمح فقط إذا كانوا أصدقاء
     if (!friendsMap.has(from) || !friendsMap.get(from).has(to)) {
       socket.emit("system_msg", "لا يمكنك إرسال رسالة خاصة قبل إضافة المستخدم كصديق.");
       return;
     }
 
-    const targetSocketId = onlineUsers.get(to);
+    const delivered = emitToUser(to, "private_message_received", {
+      from,
+      text,
+      time: new Date().toISOString(),
+    });
 
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("private_message_received", {
-        from,
-        text,
-      });
-    } else {
+    if (!delivered) {
       socket.emit("system_msg", `${to} غير متصل الآن.`);
     }
   });
 
-  // 12) حذف صديق
+  // 11) حذف صديق
   socket.on("delete_friend", (friendNameRaw) => {
     const myName = getSafeName(socket);
     const friendName =
@@ -424,52 +391,44 @@ io.on("connection", (socket) => {
 
     removeFriendship(myName, friendName);
 
-    socket.emit("friend_deleted_successfully", {
+    emitToUser(myName, "friend_deleted_successfully", {
       name: friendName,
       message: `تم حذف ${friendName} من قائمة الأصدقاء`,
     });
 
-    const friendSocketId = onlineUsers.get(friendName);
-    if (friendSocketId) {
-      io.to(friendSocketId).emit("friend_deleted_me", {
-        from: myName,
-        message: `${myName} حذفك من قائمة أصدقائه`,
-      });
+    emitToUser(friendName, "friend_deleted_me", {
+      from: myName,
+      message: `${myName} حذفك من قائمة أصدقائه`,
+    });
 
-      io.to(friendSocketId).emit("update_status", {
-        user: myName,
-        online: false,
-        lastSeen: lastSeenMap.get(myName) || "غير معروف",
-      });
-    }
+    emitToUser(friendName, "update_status", {
+      user: myName,
+      online: false,
+      lastSeen: lastSeenMap.get(myName) || "غير معروف",
+    });
   });
 
-  // 13) عند قطع الاتصال
+  // 12) disconnect
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
     removeFromWaiting(socket.id);
 
-    const partnerId = activeChats.get(socket.id);
+    const partnerId = getPartnerSocketId(socket.id);
     if (partnerId) {
-      const partnerSocket = io.sockets.sockets.get(partnerId);
-
       activeChats.delete(socket.id);
       activeChats.delete(partnerId);
 
-      if (partnerSocket) {
-        partnerSocket.emit(
-          "system_msg",
-          "انقطع اتصال الطرف الآخر. تم إنهاء المحادثة."
-        );
-        partnerSocket.emit("stop_typing");
-      }
+      io.to(partnerId).emit(
+        "system_msg",
+        "انقطع اتصال الطرف الآخر. تم إنهاء المحادثة."
+      );
+      io.to(partnerId).emit("stop_typing");
     }
 
     if (socket.username) {
-      onlineUsers.delete(socket.username);
-      lastSeenMap.set(socket.username, new Date().toISOString());
-      notifyFriendStatusChange(socket.username);
+      removeSocketForUser(socket.username, socket.id);
+      notifyFriendsStatusChange(socket.username);
     }
   });
 });
