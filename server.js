@@ -620,9 +620,12 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("private_message", async (data) => {
+  socket.on("private_message", async (data, callback) => {
     try {
-      if (!data || typeof data !== "object") return;
+      if (!data || typeof data !== "object") {
+        if (callback) callback({ success: false, error: "invalid_data" });
+        return;
+      }
 
       const to = typeof data.to === "string" ? data.to.trim() : "";
       const from =
@@ -640,10 +643,14 @@ io.on("connection", (socket) => {
         targetSocketsCount: onlineUsers.has(to) ? onlineUsers.get(to).size : 0,
       });
 
-      if (!to || !text) return;
+      if (!to || !text) {
+        if (callback) callback({ success: false, error: "missing_fields" });
+        return;
+      }
 
       if (!(await dbAreFriends(from, to))) {
         socket.emit("system_msg", "لا يمكنك إرسال رسالة خاصة قبل إضافة المستخدم كصديق.");
+        if (callback) callback({ success: false, error: "not_friends" });
         return;
       }
 
@@ -657,11 +664,20 @@ io.on("connection", (socket) => {
 
       log("[PRIVATE MESSAGE] delivered:", delivered, payload);
 
+      if (callback) {
+        callback({
+          success: true,
+          delivered,
+          payload,
+        });
+      }
+
       if (!delivered) {
         socket.emit("system_msg", `${to} غير متصل الآن.`);
       }
     } catch (error) {
       console.error("[PRIVATE MESSAGE] error:", error);
+      if (callback) callback({ success: false, error: "server_error" });
     }
   });
 
