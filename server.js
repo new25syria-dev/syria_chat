@@ -4,7 +4,7 @@ const io = require("socket.io")(process.env.PORT || 3000, {
 });
 
 // =========================
-// Debug helpers
+// Debug
 // =========================
 const DEBUG = true;
 
@@ -18,7 +18,7 @@ function log(...args) {
 // PostgreSQL
 // =========================
 if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is missing. Add your Render Postgres internal URL.");
+  throw new Error("DATABASE_URL is missing. Add it in Render Environment.");
 }
 
 const pool = new Pool({
@@ -145,7 +145,7 @@ async function dbCleanupPendingRequestsWith(username) {
 }
 
 // =========================
-// التخزين داخل الذاكرة
+// In-memory runtime state
 // =========================
 
 // المستخدمون المنتظرون للمطابقة
@@ -185,7 +185,12 @@ function ensureSet(map, key) {
 }
 
 function removeFromWaiting(socketId) {
+  const before = waitingUsers.length;
   waitingUsers = waitingUsers.filter((id) => id !== socketId);
+  const after = waitingUsers.length;
+  if (before !== after) {
+    log("[WAITING] removed socket from waiting:", socketId);
+  }
 }
 
 function addSocketForUser(username, socketId) {
@@ -193,11 +198,11 @@ function addSocketForUser(username, socketId) {
   socketToUsername.set(socketId, username);
 
   log(
-    "[ONLINE] addSocketForUser:",
+    "[ONLINE] add socket:",
     username,
     "socket:",
     socketId,
-    "total sockets:",
+    "total:",
     onlineUsers.get(username).size
   );
 }
@@ -210,18 +215,18 @@ function removeSocketForUser(username, socketId) {
   socketToUsername.delete(socketId);
 
   log(
-    "[ONLINE] removeSocketForUser:",
+    "[ONLINE] remove socket:",
     username,
     "socket:",
     socketId,
-    "remaining sockets:",
+    "remaining:",
     userSockets.size
   );
 
   if (userSockets.size === 0) {
     onlineUsers.delete(username);
     lastSeenMap.set(username, new Date().toISOString());
-    log("[ONLINE] user offline بالكامل:", username);
+    log("[ONLINE] user fully offline:", username);
   }
 }
 
@@ -233,14 +238,14 @@ function emitToUser(username, event, data) {
   const userSockets = onlineUsers.get(username);
 
   if (!userSockets || userSockets.size === 0) {
-    log("[EMIT] user offline, cannot emit:", event, "to", username);
+    log("[EMIT] user offline:", username, "event:", event);
     return false;
   }
 
   log(
-    "[EMIT] sending event:",
+    "[EMIT] sending",
     event,
-    "to user:",
+    "to",
     username,
     "socket count:",
     userSockets.size
@@ -261,7 +266,7 @@ async function sendFriendStatusToSocket(socket, friendName) {
     lastSeen: lastSeenMap.get(friendName) || "غير معروف",
   };
 
-  log("[STATUS] sendFriendStatusToSocket:", socket.username, "gets", payload);
+  log("[STATUS] send to", socket.username, payload);
   socket.emit("update_status", payload);
 }
 
@@ -275,7 +280,7 @@ async function notifyFriendsStatusChange(username) {
     lastSeen: lastSeenMap.get(username) || "غير معروف",
   };
 
-  log("[STATUS] notifyFriendsStatusChange:", username, payload);
+  log("[STATUS] notify friends of", username, payload);
 
   myFriends.forEach((friendName) => {
     emitToUser(friendName, "update_status", payload);
@@ -293,7 +298,7 @@ function clearChatForSocket(socketId) {
   activeChats.delete(socketId);
   activeChats.delete(partnerId);
 
-  log("[CHAT] clearChatForSocket:", socketId, "partner:", partnerId);
+  log("[CHAT] cleared pair:", socketId, "<->", partnerId);
   return partnerId;
 }
 
@@ -324,19 +329,19 @@ function endChatForSocket(socket, options = {}) {
 async function matchUser(socket) {
   removeFromWaiting(socket.id);
 
-  log("[MATCH] trying to match socket:", socket.id, "user:", socket.username);
+  log("[MATCH] trying for:", socket.username, socket.id);
 
   while (waitingUsers.length > 0) {
     const partnerId = waitingUsers.shift();
     const partnerSocket = io.sockets.sockets.get(partnerId);
 
     if (!partnerSocket) {
-      log("[MATCH] skipped missing partner socket:", partnerId);
+      log("[MATCH] skipped missing socket:", partnerId);
       continue;
     }
 
     if (partnerSocket.id === socket.id) {
-      log("[MATCH] skipped self partner:", partnerId);
+      log("[MATCH] skipped self");
       continue;
     }
 
@@ -350,7 +355,7 @@ async function matchUser(socket) {
 
     // لا تسمح بمطابقة الأصدقاء
     if (await dbAreFriends(myName, partnerName)) {
-      log("[MATCH] skipped friend pair:", myName, "<->", partnerName);
+      log("[MATCH] skipped friends:", myName, "<->", partnerName);
 
       if (!waitingUsers.includes(partnerSocket.id)) {
         waitingUsers.push(partnerSocket.id);
@@ -363,39 +368,33 @@ async function matchUser(socket) {
 
     log(
       "[MATCH] success:",
-      socket.username,
+      myName,
       "(",
       socket.id,
       ") <->",
-      partnerSocket.username,
+      partnerName,
       "(",
       partnerSocket.id,
       ")"
     );
 
-    socket.emit(
-      "system_msg",
-      `تم العثور على صديق: ${partnerSocket.username || "مستخدم مجهول"}`
-    );
-    partnerSocket.emit(
-      "system_msg",
-      `تم العثور على صديق: ${socket.username || "مستخدم مجهول"}`
-    );
+    socket.emit("system_msg", `تم العثور على صديق: ${partnerName}`);
+    partnerSocket.emit("system_msg", `تم العثور على صديق: ${myName}`);
     return true;
   }
 
   waitingUsers.push(socket.id);
-  log("[MATCH] no partner found, added to waiting:", socket.id, socket.username);
+  log("[MATCH] no partner, queued:", socket.username, socket.id);
   socket.emit("system_msg", "جاري البحث عن لاعب...");
   return false;
 }
 
 // =========================
-// socket.io
+// Socket events
 // =========================
 
 io.on("connection", (socket) => {
-  log("[CONNECT] New connection:", socket.id);
+  log("[CONNECT] new connection:", socket.id);
 
   socket.on("register_user", async (username) => {
     try {
@@ -404,7 +403,7 @@ io.on("connection", (socket) => {
 
       addSocketForUser(safeName, socket.id);
 
-      log("[REGISTER] user:", safeName, "socket:", socket.id);
+      log("[REGISTER]", safeName, socket.id);
 
       await notifyFriendsStatusChange(safeName);
     } catch (error) {
@@ -474,7 +473,7 @@ io.on("connection", (socket) => {
     const partnerId = getPartnerSocketId(socket.id);
     if (partnerId) {
       io.to(partnerId).emit("typing");
-      log("[CHAT] typing from:", socket.username, "to partner socket:", partnerId);
+      log("[CHAT] typing from:", socket.username, "to:", partnerId);
     }
   });
 
@@ -482,7 +481,7 @@ io.on("connection", (socket) => {
     const partnerId = getPartnerSocketId(socket.id);
     if (partnerId) {
       io.to(partnerId).emit("stop_typing");
-      log("[CHAT] stop_typing from:", socket.username, "to partner socket:", partnerId);
+      log("[CHAT] stop_typing from:", socket.username, "to:", partnerId);
     }
   });
 
@@ -490,7 +489,7 @@ io.on("connection", (socket) => {
     try {
       const partnerId = getPartnerSocketId(socket.id);
 
-      log("[FRIEND REQUEST] send request from:", socket.username, "partnerId:", partnerId);
+      log("[FRIEND REQUEST] send from:", socket.username, "partnerId:", partnerId);
 
       if (!partnerId) {
         socket.emit("system_msg", "لا يوجد لاعب لإرسال طلب صداقة له.");
@@ -509,13 +508,11 @@ io.on("connection", (socket) => {
       if (fromName === toName) return;
 
       if (await dbAreFriends(fromName, toName)) {
-        log("[FRIEND REQUEST] already friends:", fromName, toName);
         socket.emit("system_msg", `أنت و ${toName} أصدقاء بالفعل.`);
         return;
       }
 
       if (await dbHasPendingRequest(toName, fromName)) {
-        log("[FRIEND REQUEST] duplicate request:", fromName, "->", toName);
         socket.emit("friend_request_sent", {
           to: toName,
           message: `طلب الصداقة إلى ${toName} مُرسل بالفعل`,
@@ -524,8 +521,6 @@ io.on("connection", (socket) => {
       }
 
       await dbAddPendingRequest(toName, fromName);
-
-      log("[FRIEND REQUEST] stored request:", fromName, "->", toName);
 
       emitToUser(toName, "friend_request_received", {
         from: fromName,
@@ -537,7 +532,7 @@ io.on("connection", (socket) => {
         message: `تم إرسال طلب الصداقة إلى ${toName}`,
       });
     } catch (error) {
-      console.error("[FRIEND REQUEST] error:", error);
+      console.error("[SEND FRIEND REQUEST] error:", error);
     }
   });
 
@@ -548,20 +543,15 @@ io.on("connection", (socket) => {
         data && typeof data.from === "string" ? data.from.trim() : "";
       const accepted = !!(data && data.accepted);
 
-      log(
-        "[FRIEND REQUEST] response:",
-        "from target:",
+      log("[FRIEND REQUEST RESPONSE]", {
         myName,
-        "original sender:",
         fromName,
-        "accepted:",
-        accepted
-      );
+        accepted,
+      });
 
       if (!fromName) return;
 
       if (!(await dbHasPendingRequest(myName, fromName))) {
-        log("[FRIEND REQUEST] request missing for:", fromName, "->", myName);
         socket.emit("system_msg", "هذا الطلب لم يعد موجودًا.");
         return;
       }
@@ -611,7 +601,7 @@ io.on("connection", (socket) => {
         });
       }
     } catch (error) {
-      console.error("[FRIEND REQUEST RESPONSE] error:", error);
+      console.error("[RESPOND FRIEND REQUEST] error:", error);
     }
   });
 
@@ -626,7 +616,7 @@ io.on("connection", (socket) => {
         await sendFriendStatusToSocket(socket, friendName.trim());
       }
     } catch (error) {
-      console.error("[STATUS] error:", error);
+      console.error("[GET FRIENDS STATUS] error:", error);
     }
   });
 
@@ -653,7 +643,6 @@ io.on("connection", (socket) => {
       if (!to || !text) return;
 
       if (!(await dbAreFriends(from, to))) {
-        log("[PRIVATE MESSAGE] blocked, users are not friends:", from, to);
         socket.emit("system_msg", "لا يمكنك إرسال رسالة خاصة قبل إضافة المستخدم كصديق.");
         return;
       }
@@ -666,7 +655,7 @@ io.on("connection", (socket) => {
 
       const delivered = emitToUser(to, "private_message_received", payload);
 
-      log("[PRIVATE MESSAGE] delivered:", delivered, "payload:", payload);
+      log("[PRIVATE MESSAGE] delivered:", delivered, payload);
 
       if (!delivered) {
         socket.emit("system_msg", `${to} غير متصل الآن.`);
@@ -682,7 +671,7 @@ io.on("connection", (socket) => {
       const friendName =
         typeof friendNameRaw === "string" ? friendNameRaw.trim() : "";
 
-      log("[FRIENDS] delete_friend request:", myName, "->", friendName);
+      log("[DELETE FRIEND]", myName, "->", friendName);
 
       if (!friendName) return;
 
@@ -718,7 +707,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", async () => {
     try {
-      log("[DISCONNECT] socket:", socket.id, "username:", socket.username);
+      log("[DISCONNECT]", socket.id, socket.username);
 
       removeFromWaiting(socket.id);
 
@@ -729,7 +718,6 @@ io.on("connection", (socket) => {
           "انقطع اتصال الطرف الآخر. تم إنهاء المحادثة."
         );
         io.to(partnerId).emit("stop_typing");
-        log("[DISCONNECT] chat cleared with partner:", partnerId);
       }
 
       const username = socketToUsername.get(socket.id) || socket.username;
@@ -744,6 +732,9 @@ io.on("connection", (socket) => {
   });
 });
 
+// =========================
+// Start
+// =========================
 initDb()
   .then(() => {
     log("[DB] ready");
