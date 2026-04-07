@@ -4,74 +4,68 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-// تخزين المستخدمين المتصلين: { "اسم_المستخدم": "socket_id" }
-const userSockets = {};
-// تخزين حالة الاتصال ووقت الخروج: { "اسم_المستخدم": { online: true, lastSeen: "..." } }
-const userStatus = {};
-
-// للدردشة العشوائية (Random Chat)
-let waitingUsers = [];
+const userSockets = {}; // للرسائل الخاصة (الاسم -> ID)
+const waitingUsers = []; // قائمة بانتظار البحث العشوائي
 
 io.on('connection', (socket) => {
-    console.log('مستخدم جديد اتصل: ' + socket.id);
+    console.log('مستخدم متصل:', socket.id);
 
-    // 1. تسجيل المستخدم وربط اسمه بالـ ID الخاص به
+    // 1. تسجيل المستخدم فور الدخول
     socket.on('register_user', (userName) => {
         if (!userName) return;
         socket.userName = userName;
         userSockets[userName] = socket.id;
-        
-        // تحديث الحالة إلى "متصل"
-        userStatus[userName] = {
-            online: true,
-            lastSeen: "متصل الآن"
-        };
-
-        // إبلاغ الجميع أن هذا المستخدم أصبح متصلاً
-        io.emit('update_status', { user: userName, online: true, lastSeen: "متصل الآن" });
         console.log(`تم تسجيل: ${userName}`);
     });
 
-    // 2. البحث عن شريك (الدردشة العشوائية)
+    // 2. منطق البحث العشوائي
     socket.on('find_partner', () => {
-        if (waitingUsers.length > 0) {
-            let partner = waitingUsers.shift();
-            socket.partner = partner;
-            partner.partner = socket;
+        // إذا كان المستخدم موجوداً بالفعل في قائمة الانتظار، لا تكرره
+        if (waitingUsers.includes(socket.id)) return;
 
-            socket.emit('system_msg', "تم العثور على لاعب! يمكنك الدردشة الآن.");
-            partner.emit('system_msg', "تم العثور على لاعب! يمكنك الدردشة الآن.");
+        if (waitingUsers.length > 0) {
+            const partnerId = waitingUsers.pop();
+            const roomId = `room_${socket.id}_${partnerId}`;
+
+            socket.join(roomId);
+            io.sockets.sockets.get(partnerId)?.join(roomId);
+
+            socket.partnerId = partnerId;
+            const partnerSocket = io.sockets.sockets.get(partnerId);
+            if (partnerSocket) partnerSocket.partnerId = socket.id;
+
+            io.to(roomId).emit('system_msg', 'تم العثور على صديق! يمكنك الدردشة الآن.');
         } else {
-            waitingUsers.push(socket);
-            socket.emit('system_msg', "جاري البحث عن لاعب متاح...");
+            waitingUsers.push(socket.id);
+            socket.emit('system_msg', 'جاري البحث عن صديق...');
         }
     });
 
     // 3. إرسال رسالة في الدردشة العشوائية
     socket.on('message', (msg) => {
-        if (socket.partner) {
-            socket.partner.emit('message', msg);
+        // البحث عن الغرف التي ينتمي إليها السوكت (باستثناء غرفته الخاصة)
+        const rooms = Array.from(socket.rooms).filter(r => r !== socket.id);
+        if (rooms.length > 0) {
+            socket.to(rooms[0]).emit('message', msg);
         }
     });
 
-    // 4. طلبات الصداقة
+    // 4. نظام طلبات الصداقة
     socket.on('send_friend_request', (myName) => {
-        if (socket.partner && socket.partner.userName) {
-            socket.partner.emit('friend_request_received', { name: myName });
+        if (socket.partnerId) {
+            io.to(socket.partnerId).emit('friend_request_received', { name: myName });
         }
     });
 
     socket.on('accept_friend', (data) => {
-        if (socket.partner) {
-            socket.partner.emit('friend_added_successfully', data.name);
+        if (socket.partnerId) {
+            io.to(socket.partnerId).emit('friend_added_successfully', data.name);
         }
     });
 
-    // 5. الرسائل الخاصة (بين الأصدقاء) - (Critical Fix)
+    // 5. الرسائل الخاصة (بين الأصدقاء المضافين)
     socket.on('private_message', (data) => {
         const targetSocketId = userSockets[data.to];
         if (targetSocketId) {
@@ -79,66 +73,20 @@ io.on('connection', (socket) => {
                 from: data.from,
                 text: data.text
             });
-            console.log(`رسالة من ${data.from} إلى ${data.to}`);
         }
     });
 
-    // 6. طلب حالة الأصدقاء (Online/Offline)
-    socket.on('get_friends_status', (friendsList) => {
-        if (!friendsList) return;
-        friendsList.forEach(friendName => {
-            const status = userStatus[friendName] || { online: false, lastSeen: "غير معروف" };
-            socket.emit('update_status', { 
-                user: friendName, 
-                online: status.online, 
-                lastSeen: status.lastSeen 
-            });
-        });
-    });
-
-    // 7. الحذف المتبادل (Mutual Delete)
-    socket.on('delete_friend_request', (data) => {
-        const friendId = userSockets[data.friend];
-        if (friendId) {
-            io.to(friendId).emit('friend_deleted_me', { from: data.me });
-            console.log(`${data.me} حذف ${data.friend}`);
-        }
-    });
-
-    // 8. التعامل مع قطع الاتصال
     socket.on('disconnect', () => {
+        // إزالة المستخدم من قائمة الانتظار إذا خرج
+        const index = waitingUsers.indexOf(socket.id);
+        if (index > -1) waitingUsers.splice(index, 1);
+        
         if (socket.userName) {
-            const now = new Date();
-            const timeStr = `${now.getHours()}:${now.getMinutes()}`;
-            
-            userStatus[socket.userName] = {
-                online: false,
-                lastSeen: timeStr
-            };
-
-            // إبلاغ الجميع أن المستخدم خرج
-            io.emit('update_status', { 
-                user: socket.userName, 
-                online: false, 
-                lastSeen: timeStr 
-            });
-
             delete userSockets[socket.userName];
-        }
-
-        // إخراج المستخدم من قائمة الانتظار إذا كان فيها
-        waitingUsers = waitingUsers.filter(u => u.id !== socket.id);
-
-        // إبلاغ شريك الدردشة العشوائية بانقطاع الاتصال
-        if (socket.partner) {
-            socket.partner.emit('system_msg', "انقطع الاتصال بالشريك.");
-            socket.partner.partner = null;
         }
         console.log('مستخدم غادر');
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`السيرفر يعمل على المنفذ: ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
