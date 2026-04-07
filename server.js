@@ -225,6 +225,7 @@ function cleanupPendingRequestsWith(username) {
   });
 }
 
+// ✅ المطابقة الآن تمنع لقاء الأصدقاء
 function matchUser(socket) {
   removeFromWaiting(socket.id);
 
@@ -246,6 +247,20 @@ function matchUser(socket) {
 
     if (activeChats.has(partnerSocket.id)) {
       log("[MATCH] skipped busy partner:", partnerId);
+      continue;
+    }
+
+    const myName = socket.username || getSafeName(socket);
+    const partnerName = partnerSocket.username || getSafeName(partnerSocket);
+
+    // ✅ لا تسمح بمطابقة الأصدقاء
+    if (areFriends(myName, partnerName)) {
+      log("[MATCH] skipped friend pair:", myName, "<->", partnerName);
+
+      // نعيد الشريك لقائمة الانتظار ليتم إيجاد شخص آخر له لاحقًا
+      if (!waitingUsers.includes(partnerSocket.id)) {
+        waitingUsers.push(partnerSocket.id);
+      }
       continue;
     }
 
@@ -288,7 +303,6 @@ function matchUser(socket) {
 io.on("connection", (socket) => {
   log("[CONNECT] New connection:", socket.id);
 
-  // 1) تسجيل المستخدم
   socket.on("register_user", (username) => {
     const safeName = getSafeName(socket, username);
     socket.username = safeName;
@@ -303,7 +317,6 @@ io.on("connection", (socket) => {
     notifyFriendsStatusChange(safeName);
   });
 
-  // 2) بدء المطابقة
   socket.on("find_partner", () => {
     if (!socket.username) {
       socket.username = getSafeName(socket);
@@ -320,7 +333,6 @@ io.on("connection", (socket) => {
     matchUser(socket);
   });
 
-  // 3) التخطي
   socket.on("skip_partner", () => {
     log("[CHAT] skip_partner from:", socket.username, socket.id);
 
@@ -333,7 +345,6 @@ io.on("connection", (socket) => {
     socket.emit("system_msg", "تم التخطي. اضغط بحث عن لاعب لبدء مطابقة جديدة.");
   });
 
-  // 4) رسالة نصية عامة
   socket.on("message", (msg) => {
     const partnerId = getPartnerSocketId(socket.id);
 
@@ -347,7 +358,6 @@ io.on("connection", (socket) => {
     io.to(partnerId).emit("message", msg);
   });
 
-  // 5) صورة
   socket.on("image", (base64Image) => {
     const partnerId = getPartnerSocketId(socket.id);
 
@@ -361,7 +371,6 @@ io.on("connection", (socket) => {
     io.to(partnerId).emit("image", base64Image);
   });
 
-  // 6) typing
   socket.on("typing", () => {
     const partnerId = getPartnerSocketId(socket.id);
     if (partnerId) {
@@ -378,7 +387,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 7) إرسال طلب صداقة
   socket.on("send_friend_request", (senderName) => {
     const partnerId = getPartnerSocketId(socket.id);
 
@@ -431,7 +439,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // 8) قبول / رفض طلب الصداقة
   socket.on("respond_friend_request", (data) => {
     const myName = getSafeName(socket);
     const fromName =
@@ -504,7 +511,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 9) حالات الأصدقاء
   socket.on("get_friends_status", (friendsList) => {
     log("[STATUS] get_friends_status from:", socket.username, friendsList);
 
@@ -516,7 +522,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // 10) الرسائل الخاصة
   socket.on("private_message", (data) => {
     if (!data || typeof data !== "object") return;
 
@@ -560,7 +565,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 11) حذف صديق
   socket.on("delete_friend", (friendNameRaw) => {
     const myName = getSafeName(socket);
     const friendName =
@@ -597,7 +601,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // 12) قطع الاتصال
   socket.on("disconnect", () => {
     log("[DISCONNECT] socket:", socket.id, "username:", socket.username);
 
