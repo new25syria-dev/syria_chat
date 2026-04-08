@@ -3,9 +3,6 @@ const io = require("socket.io")(process.env.PORT || 3000, {
   cors: { origin: "*" },
 });
 
-// =========================
-// Debug
-// =========================
 const DEBUG = true;
 
 function log(...args) {
@@ -14,9 +11,6 @@ function log(...args) {
   }
 }
 
-// =========================
-// PostgreSQL
-// =========================
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is missing. Add it in Render Environment.");
 }
@@ -103,6 +97,7 @@ async function dbGetFriendsFor(username) {
       END AS friend_name
     FROM friendships
     WHERE user_a = $1 OR user_b = $1
+    ORDER BY friend_name ASC
     `,
     [username]
   );
@@ -177,18 +172,12 @@ async function dbGetPrivateConversation(userA, userB, limit = 100) {
   return result.rows;
 }
 
-// =========================
-// In-memory runtime state
-// =========================
 let waitingUsers = [];
 const activeChats = new Map();
 const onlineUsers = new Map();
 const lastSeenMap = new Map();
 const socketToUsername = new Map();
 
-// =========================
-// Helpers
-// =========================
 function getSafeName(socket, providedName) {
   if (typeof providedName === "string" && providedName.trim()) {
     return providedName.trim();
@@ -214,14 +203,7 @@ function addSocketForUser(username, socketId) {
   ensureSet(onlineUsers, username).add(socketId);
   socketToUsername.set(socketId, username);
 
-  log(
-    "[ONLINE] add socket:",
-    username,
-    "socket:",
-    socketId,
-    "total:",
-    onlineUsers.get(username).size
-  );
+  log("[ONLINE] add socket:", username, "socket:", socketId);
 }
 
 function removeSocketForUser(username, socketId) {
@@ -230,15 +212,6 @@ function removeSocketForUser(username, socketId) {
   const userSockets = onlineUsers.get(username);
   userSockets.delete(socketId);
   socketToUsername.delete(socketId);
-
-  log(
-    "[ONLINE] remove socket:",
-    username,
-    "socket:",
-    socketId,
-    "remaining:",
-    userSockets.size
-  );
 
   if (userSockets.size === 0) {
     onlineUsers.delete(username);
@@ -255,7 +228,6 @@ function emitToUser(username, event, data) {
   const userSockets = onlineUsers.get(username);
 
   if (!userSockets || userSockets.size === 0) {
-    log("[EMIT] user offline:", username, "event:", event);
     return false;
   }
 
@@ -266,7 +238,6 @@ function emitToUser(username, event, data) {
     if (targetSocket) {
       io.to(socketId).emit(event, data);
       sent = true;
-      log("[EMIT] -> socket:", socketId, "event:", event);
     }
   });
 
@@ -370,9 +341,6 @@ async function matchUser(socket) {
   return false;
 }
 
-// =========================
-// Socket events
-// =========================
 io.on("connection", (socket) => {
   log("[CONNECT] new connection:", socket.id);
 
@@ -384,6 +352,24 @@ io.on("connection", (socket) => {
       await notifyFriendsStatusChange(safeName);
     } catch (error) {
       console.error("[REGISTER] error:", error);
+    }
+  });
+
+  socket.on("get_my_friends", async (username, callback) => {
+    try {
+      const safeName = getSafeName(socket, username);
+
+      const friends = await dbGetFriendsFor(safeName);
+
+      if (callback) {
+        callback({
+          success: true,
+          friends,
+        });
+      }
+    } catch (error) {
+      console.error("[GET MY FRIENDS] error:", error);
+      if (callback) callback({ success: false, error: "server_error" });
     }
   });
 
@@ -725,9 +711,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// =========================
-// Start
-// =========================
 initDb()
   .then(() => {
     log("[DB] ready");
