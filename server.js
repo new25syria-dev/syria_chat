@@ -7,54 +7,40 @@ const app = express();
 app.use(cors());
 const server = http.createServer(app);
 
-// إعدادات السوكت مع تفعيل كل الخيارات لضمان وصول الإشارة
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    },
-    transports: ['websocket', 'polling'] 
+    cors: { origin: "*" },
+    transports: ['websocket'] // إجبار السيرفر على استخدام أسرع وسيلة اتصال
 });
 
-let waitingUser = null; 
+let waitingUser = null;
 
 io.on('connection', (socket) => {
-    // هذه الجملة تظهر عندك في الصورة (✅ مستخدم جديد متصل الآن)
-    console.log('✅ مستخدم جديد متصل الآن:', socket.id);
+    console.log('✅ مستخدم متصل:', socket.id);
 
-    // دالة المعالجة الموحدة
-    const handleSearch = (data) => {
-        console.log('🔎 [إشارة وصلت] مستخدم يطلب البحث الآن:', socket.id);
-
+    socket.on('join_random_chat', (data) => {
+        console.log('🔎 طلب بحث من:', socket.id);
+        
         if (waitingUser && waitingUser.id !== socket.id) {
             const partner = waitingUser;
             waitingUser = null;
 
             io.to(socket.id).emit('chat_started', { partnerId: partner.id });
             io.to(partner.id).emit('chat_started', { partnerId: socket.id });
-
-            console.log('🎊 تم الربط بنجاح بين جهازيين!');
+            console.log('🎊 تم الربط بنجاح!');
         } else {
             waitingUser = socket;
-            console.log('⏳ واحد في قائمة الانتظار، ننتظر الثاني...');
+            console.log('⏳ في انتظار شريك...');
         }
-    };
-
-    // سنستمع لكل الاحتمالات التي قد يرسلها الفلاتر
-    socket.on('join_random_chat', handleSearch);
-    socket.on('search_partner', handleSearch);
-    socket.on('message', handleSearch); // كاحتياط
+    });
 
     socket.on('disconnect', () => {
-        if (waitingUser && waitingUser.id === socket.id) {
-            waitingUser = null;
-        }
-        console.log('❌ مستخدم قطع الاتصال');
+        if (waitingUser && waitingUser.id === socket.id) waitingUser = null;
+        console.log('❌ قطع الاتصال');
     });
 });
 
-// ملاحظة: Render يستخدم المنفذ 10000 تلقائياً وهذا سليم
-const PORT = process.env.PORT || 10000;
+// السطر السحري: يعمل على 3000 محلياً وعلى منفذ Render تلقائياً
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 السيرفر يعمل الآن على المنفذ ${PORT}`);
+    console.log(`Server listening on port ${PORT}`);
 });
