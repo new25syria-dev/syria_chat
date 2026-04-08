@@ -1,16 +1,14 @@
 {
   "name": "fadfad-socket-server",
   "version": "1.0.0",
-  "description": "Socket.io server for FadFad app with PostgreSQL persistence",
   "main": "server.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "mongoose": "^8.0.0",
+    "cors": "^2.8.5"
+  },
   "scripts": {
     "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {
-    "pg": "^8.12.0",
-    "socket.io": "^4.8.1"
   }
 }
