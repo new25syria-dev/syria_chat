@@ -1,56 +1,43 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const mongoose = require("mongoose");
+require("dotenv").config();
 
 const app = express();
-app.use(cors());
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    cors: { origin: "*" },
-    transports: ['websocket', 'polling']
+  cors: {
+    origin: "*",
+  },
 });
 
-let waitingUser = null;
+// MongoDB
+mongoose.connect(process.env.DATABASE_URL)
+  .then(() => console.log("MongoDB connected"))
+  .catch(err => console.log(err));
 
-io.on('connection', (socket) => {
-    console.log('✅ مستخدم متصل:', socket.id);
+// test route
+app.get("/", (req, res) => {
+  res.send("Server is running");
+});
 
-    // دالة الربط المشتركة
-    const handleJoin = (data) => {
-        console.log(`🔎 محاولة مطابقة للمستخدم: ${socket.id}`);
+// socket
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
 
-        if (waitingUser && waitingUser.id !== socket.id) {
-            const partner = waitingUser;
-            waitingUser = null;
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
 
-            // إرسال حدث البداية للجهازين
-            io.to(socket.id).emit('chat_started', { partnerId: partner.id });
-            io.to(partner.id).emit('chat_started', { partnerId: socket.id });
-
-            console.log('🎊 تم التطابق بنجاح بين جهازيين!');
-        } else {
-            waitingUser = socket;
-            console.log('⏳ مستخدم واحد في الانتظار...');
-        }
-    };
-
-    // الاستماع للحدث الذي يرسله تطبيقك فعلياً (من واقع الصورة)
-    socket.on('register_user', handleJoin); 
-    
-    // احتياطاً سنبقي على الأسماء الأخرى
-    socket.on('join_random_chat', handleJoin);
-
-    socket.on('disconnect', () => {
-        if (waitingUser && waitingUser.id === socket.id) {
-            waitingUser = null;
-        }
-        console.log('❌ مستخدم قطع الاتصال');
-    });
+  socket.on("message", (data) => {
+    socket.broadcast.emit("message", data);
+  });
 });
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 السيرفر يعمل على المنفذ ${PORT}`);
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
