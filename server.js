@@ -47,6 +47,17 @@ async function initDb() {
     );
   `);
 
+  // ✅ جدول الرسائل الخاصة
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS private_messages (
+      id BIGSERIAL PRIMARY KEY,
+      sender TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      message_text TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   log("[DB] tables initialized");
 }
 
@@ -144,29 +155,49 @@ async function dbCleanupPendingRequestsWith(username) {
   );
 }
 
+// ✅ حفظ الرسالة الخاصة
+async function dbSavePrivateMessage(sender, receiver, text) {
+  const result = await pool.query(
+    `
+    INSERT INTO private_messages (sender, receiver, message_text)
+    VALUES ($1, $2, $3)
+    RETURNING id, sender, receiver, message_text, created_at
+    `,
+    [sender, receiver, text]
+  );
+  return result.rows[0];
+}
+
+// ✅ جلب سجل المحادثة بين شخصين
+async function dbGetPrivateConversation(userA, userB, limit = 100) {
+  const result = await pool.query(
+    `
+    SELECT id, sender, receiver, message_text, created_at
+    FROM private_messages
+    WHERE
+      (sender = $1 AND receiver = $2)
+      OR
+      (sender = $2 AND receiver = $1)
+    ORDER BY created_at ASC
+    LIMIT $3
+    `,
+    [userA, userB, limit]
+  );
+  return result.rows;
+}
+
 // =========================
 // In-memory runtime state
 // =========================
-
-// المستخدمون المنتظرون للمطابقة
 let waitingUsers = [];
-
-// socketId => partnerSocketId
 const activeChats = new Map();
-
-// username => Set(socketId)
 const onlineUsers = new Map();
-
-// username => ISO string
 const lastSeenMap = new Map();
-
-// socketId => username
 const socketToUsername = new Map();
 
 // =========================
 // Helpers
 // =========================
-
 function getSafeName(socket, providedName) {
   if (typeof providedName === "string" && providedName.trim()) {
     return providedName.trim();
@@ -353,7 +384,6 @@ async function matchUser(socket) {
     const myName = socket.username || getSafeName(socket);
     const partnerName = partnerSocket.username || getSafeName(partnerSocket);
 
-    // لا تسمح بمطابقة الأصدقاء
     if (await dbAreFriends(myName, partnerName)) {
       log("[MATCH] skipped friends:", myName, "<->", partnerName);
 
@@ -620,6 +650,37 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ✅ جلب سجل المحادثة الحقيقي من القاعدة
+  socket.on("get_private_history", async (data, callback) => {
+    try {
+      const user = typeof data?.user === "string" ? data.user.trim() : "";
+      const friend = typeof data?.friend === "string" ? data.friend.trim() : "";
+      const limit = Number.isInteger(data?.limit) ? data.limit : 100;
+
+      if (!user || !friend) {
+        if (callback) callback({ success: false, error: "missing_fields" });
+        return;
+      }
+
+      if (!(await dbAreFriends(user, friend))) {
+        if (callback) callback({ success: false, error: "not_friends" });
+        return;
+      }
+
+      const history = await dbGetPrivateConversation(user, friend, limit);
+
+      if (callback) {
+        callback({
+          success: true,
+          history,
+        });
+      }
+    } catch (error) {
+      console.error("[GET PRIVATE HISTORY] error:", error);
+      if (callback) callback({ success: false, error: "server_error" });
+    }
+  });
+
   socket.on("private_message", async (data, callback) => {
     try {
       if (!data || typeof data !== "object") {
@@ -654,10 +715,14 @@ io.on("connection", (socket) => {
         return;
       }
 
+      const saved = await dbSavePrivateMessage(from, to, text);
+
       const payload = {
-        from,
-        text,
-        time: new Date().toISOString(),
+        id: saved.id,
+        from: saved.sender,
+        to: saved.receiver,
+        text: saved.message_text,
+        time: saved.created_at,
       };
 
       const delivered = emitToUser(to, "private_message_received", payload);
