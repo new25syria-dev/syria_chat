@@ -1,19 +1,14 @@
 {
-  "name": "fadfad-socket-server",
+  "name": "fadfad-server",
   "version": "1.0.0",
   "main": "server.js",
-  "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^4.22.1",
-    "mongoose": "^8.23.0",
-    "socket.io": "^4.8.3"
-  },
   "scripts": {
     "start": "node server.js"
   },
-  "description": "",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs"
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.0.0",
+    "socket.io": "^4.7.2",
+    "dotenv": "^16.0.3"
+  }
 }
