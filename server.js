@@ -33,18 +33,18 @@ const io = new Server(server, {
    Config
 ========================= */
 const PORT = process.env.PORT || 3000;
-const MONGO_URI =
-  process.env.DATABASE_URL ||
-  process.env.MONGO_URI ||
-  "mongodb://127.0.0.1:27017/fadfad_chat_db";
+const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
+
+if (!DATABASE_URL) {
+  console.error("❌ DATABASE_URL is missing in .nenv");
+  process.exit(1);
+}
 
 /* =========================
-   MongoDB
+   MongoDB settings
 ========================= */
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+mongoose.set("strictQuery", true);
+mongoose.set("bufferCommands", false);
 
 /* =========================
    Schemas
@@ -207,6 +207,10 @@ function conversationKey(a, b) {
 function removeFromQueue(userName) {
   const i = waitingQueue.indexOf(userName);
   if (i !== -1) waitingQueue.splice(i, 1);
+}
+
+function isDbReady() {
+  return mongoose.connection.readyState === 1;
 }
 
 async function getUserSocket(userName) {
@@ -382,11 +386,20 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: "FadFad server running",
+    dbReady: isDbReady(),
   });
 });
 
 app.get("/health", async (req, res) => {
   try {
+    if (!isDbReady()) {
+      return res.status(500).json({
+        ok: false,
+        dbReady: false,
+        error: "MongoDB not connected",
+      });
+    }
+
     const users = await User.countDocuments();
     const friendships = await Friendship.countDocuments();
     const friendRequests = await FriendRequest.countDocuments();
@@ -394,6 +407,7 @@ app.get("/health", async (req, res) => {
 
     res.json({
       ok: true,
+      dbReady: true,
       users,
       friendships,
       friendRequests,
@@ -404,6 +418,7 @@ app.get("/health", async (req, res) => {
   } catch (err) {
     res.status(500).json({
       ok: false,
+      dbReady: isDbReady(),
       error: err.message,
     });
   }
@@ -415,8 +430,17 @@ app.get("/health", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("🟢 Socket connected:", socket.id);
 
+  socket.onAny((eventName) => {
+    if (!isDbReady()) {
+      console.log(`⚠️ DB not ready, skipped event: ${eventName}`);
+      socket.emit("system_msg", "السيرفر غير جاهز حالياً، حاول بعد لحظات");
+    }
+  });
+
   socket.on("register_user", async (rawUserName) => {
     try {
+      if (!isDbReady()) return;
+
       const userName = normalizeName(rawUserName);
       if (!userName) return;
 
@@ -433,6 +457,8 @@ io.on("connection", (socket) => {
 
   socket.on("find_partner", async () => {
     try {
+      if (!isDbReady()) return;
+
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
       await tryMatch(userName);
@@ -443,6 +469,8 @@ io.on("connection", (socket) => {
 
   socket.on("skip_partner", async () => {
     try {
+      if (!isDbReady()) return;
+
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
@@ -468,6 +496,8 @@ io.on("connection", (socket) => {
 
   socket.on("leave_chat", async () => {
     try {
+      if (!isDbReady()) return;
+
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
       await endMatch(userName, "تم إنهاء المحادثة");
@@ -478,6 +508,8 @@ io.on("connection", (socket) => {
 
   socket.on("message", async (msg) => {
     try {
+      if (!isDbReady()) return;
+
       const sender = socket.data.userName || socketToUser.get(socket.id);
       const partner = activeMatches.get(sender);
 
@@ -491,6 +523,8 @@ io.on("connection", (socket) => {
 
   socket.on("image", async (imgBase64) => {
     try {
+      if (!isDbReady()) return;
+
       const sender = socket.data.userName || socketToUser.get(socket.id);
       const partner = activeMatches.get(sender);
 
@@ -504,6 +538,8 @@ io.on("connection", (socket) => {
 
   socket.on("typing", async () => {
     try {
+      if (!isDbReady()) return;
+
       const sender = socket.data.userName || socketToUser.get(socket.id);
       const partner = activeMatches.get(sender);
       if (!sender || !partner) return;
@@ -516,6 +552,8 @@ io.on("connection", (socket) => {
 
   socket.on("stop_typing", async () => {
     try {
+      if (!isDbReady()) return;
+
       const sender = socket.data.userName || socketToUser.get(socket.id);
       const partner = activeMatches.get(sender);
       if (!sender || !partner) return;
@@ -528,6 +566,8 @@ io.on("connection", (socket) => {
 
   socket.on("private_message", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const from = normalizeName(data?.from || socket.data.userName);
       const to = normalizeName(data?.to);
       const text = String(data?.text || "").trim();
@@ -556,6 +596,8 @@ io.on("connection", (socket) => {
 
   socket.on("get_private_history", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const from = normalizeName(data?.from || socket.data.userName);
       const to = normalizeName(data?.to);
 
@@ -589,6 +631,8 @@ io.on("connection", (socket) => {
 
   socket.on("mark_messages_read", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const user = normalizeName(data?.user || socket.data.userName);
       const friend = normalizeName(data?.friend || data?.friendId);
 
@@ -611,6 +655,8 @@ io.on("connection", (socket) => {
 
   socket.on("send_friend_request", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const from = normalizeName(data?.from || socket.data.userName);
       const to = normalizeName(data?.to);
 
@@ -651,6 +697,8 @@ io.on("connection", (socket) => {
 
   socket.on("respond_friend_request", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const responder = socket.data.userName || socketToUser.get(socket.id);
       const from = normalizeName(data?.from);
       const accepted = data?.accepted === true;
@@ -700,6 +748,8 @@ io.on("connection", (socket) => {
 
   socket.on("get_my_friends", async () => {
     try {
+      if (!isDbReady()) return;
+
       const me = socket.data.userName || socketToUser.get(socket.id);
       if (!me) {
         socket.emit("my_friends", []);
@@ -716,6 +766,8 @@ io.on("connection", (socket) => {
 
   socket.on("get_friends_status", async (friends) => {
     try {
+      if (!isDbReady()) return;
+
       const requester = socket.data.userName || socketToUser.get(socket.id);
       if (!requester || !Array.isArray(friends)) return;
 
@@ -727,6 +779,8 @@ io.on("connection", (socket) => {
 
   socket.on("delete_friend", async (data) => {
     try {
+      if (!isDbReady()) return;
+
       const me = socket.data.userName || socketToUser.get(socket.id);
       const friend = normalizeName(data?.friend);
 
@@ -749,6 +803,8 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", async () => {
     try {
+      if (!isDbReady()) return;
+
       const userName = socket.data.userName || socketToUser.get(socket.id);
 
       if (userName) {
@@ -771,6 +827,25 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+/* =========================
+   Start after DB connection
+========================= */
+async function startServer() {
+  try {
+    console.log("⏳ Connecting to MongoDB...");
+    await mongoose.connect(DATABASE_URL, {
+      serverSelectionTimeoutMS: 15000,
+    });
+
+    console.log("✅ MongoDB connected");
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:");
+    console.error(err.message);
+    process.exit(1);
+  }
+}
+
+startServer();
