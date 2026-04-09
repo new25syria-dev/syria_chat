@@ -33,7 +33,7 @@ function removeFromWaiting(socketId) {
   }
 }
 
-function endChatForSocket(socketId, notifyPartner = true) {
+function cleanupUser(socketId, notifyPartner = true) {
   const partnerId = activeChats.get(socketId);
 
   if (partnerId) {
@@ -82,12 +82,15 @@ io.on("connection", (socket) => {
       activeChats.set(socket.id, partnerSocket.id);
       activeChats.set(partnerSocket.id, socket.id);
 
+      const socketName = socket.userName || socket.id;
+      const partnerName = partnerSocket.userName || partnerSocket.id;
+
       socket.emit("chat_started", {
-        partnerId: partnerSocket.userName || partnerSocket.id,
+        partnerId: partnerName,
       });
 
       partnerSocket.emit("chat_started", {
-        partnerId: socket.userName || socket.id,
+        partnerId: socketName,
       });
 
       console.log(`Matched ${socket.id} with ${partnerSocket.id}`);
@@ -98,6 +101,7 @@ io.on("connection", (socket) => {
     console.log("Waiting:", socket.id);
   });
 
+  // رسائل عامة بين الشريكين
   socket.on("message", (data) => {
     console.log("message received from", socket.id, data);
 
@@ -107,10 +111,14 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // نرسل الحدثين معًا للتوافق مع Flutter
     io.to(partnerId).emit("message", data);
+    io.to(partnerId).emit("private_message", data);
+
     console.log("message forwarded to", partnerId);
   });
 
+  // رسائل خاصة بين الشريكين
   socket.on("private_message", (data) => {
     console.log("private_message received from", socket.id, data);
 
@@ -120,7 +128,10 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // نرسل الحدثين معًا للتوافق
     io.to(partnerId).emit("private_message", data);
+    io.to(partnerId).emit("message", data);
+
     console.log("private_message forwarded to", partnerId);
   });
 
@@ -143,7 +154,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
-    endChatForSocket(socket.id, true);
+    cleanupUser(socket.id, true);
   });
 });
 
