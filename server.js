@@ -14,10 +14,20 @@ const io = new Server(server, {
   },
 });
 
-mongoose
-  .connect(process.env.DATABASE_URL)
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.log("MongoDB error:", err));
+// مهم: لا نخلي فشل MongoDB يوقف السيرفر
+async function connectMongo() {
+  try {
+    await mongoose.connect(process.env.DATABASE_URL, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    });
+    console.log("MongoDB connected");
+  } catch (err) {
+    console.log("MongoDB error:", err.message);
+  }
+}
+
+connectMongo();
 
 app.get("/", (req, res) => {
   res.send("Server is running");
@@ -101,7 +111,6 @@ io.on("connection", (socket) => {
     console.log("Waiting:", socket.id);
   });
 
-  // رسائل عامة بين الشريكين
   socket.on("message", (data) => {
     console.log("message received from", socket.id, data);
 
@@ -111,14 +120,12 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // نرسل الحدثين معًا للتوافق مع Flutter
     io.to(partnerId).emit("message", data);
     io.to(partnerId).emit("private_message", data);
 
     console.log("message forwarded to", partnerId);
   });
 
-  // رسائل خاصة بين الشريكين
   socket.on("private_message", (data) => {
     console.log("private_message received from", socket.id, data);
 
@@ -128,7 +135,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // نرسل الحدثين معًا للتوافق
     io.to(partnerId).emit("private_message", data);
     io.to(partnerId).emit("message", data);
 
@@ -159,7 +165,6 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 10000;
-
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
