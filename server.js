@@ -14,7 +14,6 @@ const io = new Server(server, {
   },
 });
 
-// مهم: لا نخلي فشل MongoDB يوقف السيرفر
 async function connectMongo() {
   try {
     await mongoose.connect(process.env.DATABASE_URL, {
@@ -34,13 +33,11 @@ app.get("/", (req, res) => {
 });
 
 const waitingUsers = [];
-const activeChats = new Map(); // socket.id -> partnerSocketId
+const activeChats = new Map();
 
 function removeFromWaiting(socketId) {
   const index = waitingUsers.findIndex((s) => s.id === socketId);
-  if (index !== -1) {
-    waitingUsers.splice(index, 1);
-  }
+  if (index !== -1) waitingUsers.splice(index, 1);
 }
 
 function cleanupUser(socketId, notifyPartner = true) {
@@ -73,16 +70,12 @@ io.on("connection", (socket) => {
   socket.on("find_partner", () => {
     console.log("Searching partner:", socket.id);
 
-    if (activeChats.has(socket.id)) {
-      console.log("Already matched:", socket.id);
-      return;
-    }
+    if (activeChats.has(socket.id)) return;
 
     removeFromWaiting(socket.id);
 
     while (waitingUsers.length > 0) {
       const partnerSocket = waitingUsers.shift();
-
       if (!partnerSocket) continue;
       if (partnerSocket.id === socket.id) continue;
 
@@ -92,15 +85,12 @@ io.on("connection", (socket) => {
       activeChats.set(socket.id, partnerSocket.id);
       activeChats.set(partnerSocket.id, socket.id);
 
-      const socketName = socket.userName || socket.id;
-      const partnerName = partnerSocket.userName || partnerSocket.id;
-
       socket.emit("chat_started", {
-        partnerId: partnerName,
+        partnerId: partnerSocket.userName || partnerSocket.id,
       });
 
       partnerSocket.emit("chat_started", {
-        partnerId: socketName,
+        partnerId: socket.userName || socket.id,
       });
 
       console.log(`Matched ${socket.id} with ${partnerSocket.id}`);
@@ -113,45 +103,31 @@ io.on("connection", (socket) => {
 
   socket.on("message", (data) => {
     console.log("message received from", socket.id, data);
-
     const partnerId = activeChats.get(socket.id);
-    if (!partnerId) {
-      console.log("No partner found for", socket.id);
-      return;
-    }
+    if (!partnerId) return;
 
     io.to(partnerId).emit("message", data);
     io.to(partnerId).emit("private_message", data);
-
     console.log("message forwarded to", partnerId);
   });
 
   socket.on("private_message", (data) => {
     console.log("private_message received from", socket.id, data);
-
     const partnerId = activeChats.get(socket.id);
-    if (!partnerId) {
-      console.log("No partner found for", socket.id);
-      return;
-    }
+    if (!partnerId) return;
 
     io.to(partnerId).emit("private_message", data);
     io.to(partnerId).emit("message", data);
-
     console.log("private_message forwarded to", partnerId);
   });
 
   socket.on("skip_partner", () => {
-    console.log("skip_partner:", socket.id);
-
     const partnerId = activeChats.get(socket.id);
 
     if (partnerId) {
       activeChats.delete(socket.id);
       activeChats.delete(partnerId);
-
       io.to(partnerId).emit("partner_skipped");
-      console.log("partner_skipped sent to", partnerId);
     }
 
     socket.emit("partner_skipped");
