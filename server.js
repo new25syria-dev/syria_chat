@@ -10,131 +10,67 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
   },
 });
 
-mongoose
-  .connect(process.env.DATABASE_URL)
+mongoose.connect(process.env.DATABASE_URL)
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.log("MongoDB error:", err));
+  .catch(err => console.log(err));
 
 app.get("/", (req, res) => {
   res.send("Server is running");
 });
 
-// المستخدمون المنتظرون
 const waitingUsers = [];
-
-// ربط كل مستخدم بشريكه
-const activeChats = new Map(); // socket.id => partnerSocketId
-
-function removeFromWaiting(socketId) {
-  const index = waitingUsers.indexOf(socketId);
-  if (index !== -1) {
-    waitingUsers.splice(index, 1);
-  }
-}
-
-function endChat(socket, notifyPartner = true) {
-  const partnerId = activeChats.get(socket.id);
-
-  if (partnerId) {
-    activeChats.delete(socket.id);
-    activeChats.delete(partnerId);
-
-    if (notifyPartner) {
-      io.to(partnerId).emit("partner_disconnected");
-    }
-  }
-
-  removeFromWaiting(socket.id);
-}
+const activeChats = new Map();
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  // المستخدم يطلب شريك
-  socket.on("find_partner", () => {
-    console.log("find_partner:", socket.id);
-
-    // إذا كان عنده شريك مسبقًا لا نفعل شيئًا
-    if (activeChats.has(socket.id)) {
-      return;
-    }
-
-    // إذا كان موجودًا في قائمة الانتظار لا نكرره
-    if (waitingUsers.includes(socket.id)) {
-      return;
-    }
-
-    // البحث عن أول مستخدم منتظر صالح
-    while (waitingUsers.length > 0) {
-      const partnerId = waitingUsers.shift();
-
-      if (!partnerId || partnerId === socket.id) {
-        continue;
-      }
-
-      const partnerSocket = io.sockets.sockets.get(partnerId);
-
-      if (!partnerSocket) {
-        continue;
-      }
-
-      // تم العثور على شريك
-      activeChats.set(socket.id, partnerId);
-      activeChats.set(partnerId, socket.id);
-
-      socket.emit("partner_found", {
-        partnerId: partnerId,
-      });
-
-      partnerSocket.emit("partner_found", {
-        partnerId: socket.id,
-      });
-
-      console.log(`Matched: ${socket.id} <-> ${partnerId}`);
-      return;
-    }
-
-    // لا يوجد شريك حاليًا، ضعه في الانتظار
-    waitingUsers.push(socket.id);
-    socket.emit("waiting_for_partner");
-    console.log("User waiting:", socket.id);
+  socket.on("register_user", (userName) => {
+    socket.userName = userName;
+    console.log("Registered:", userName);
   });
 
-  // إرسال رسالة للشريك فقط
+  socket.on("find_partner", () => {
+    console.log("Searching partner:", socket.id);
+
+    if (waitingUsers.length > 0) {
+      const partner = waitingUsers.shift();
+
+      activeChats.set(socket.id, partner.id);
+      activeChats.set(partner.id, socket.id);
+
+      // 🔥 هذا الحدث مهم لأنه Flutter ينتظره
+      socket.emit("chat_started", {
+        partnerId: partner.userName || partner.id,
+      });
+
+      partner.emit("chat_started", {
+        partnerId: socket.userName || socket.id,
+      });
+
+      console.log(`Matched ${socket.id} with ${partner.id}`);
+    } else {
+      waitingUsers.push(socket);
+      console.log("Waiting:", socket.id);
+    }
+  });
+
   socket.on("message", (data) => {
     const partnerId = activeChats.get(socket.id);
-
-    if (!partnerId) {
-      return;
-    }
-
-    io.to(partnerId).emit("message", data);
-  });
-
-  // تخطي الشريك الحالي والعودة للبحث
-  socket.on("skip_partner", () => {
-    const partnerId = activeChats.get(socket.id);
-
     if (partnerId) {
-      activeChats.delete(socket.id);
-      activeChats.delete(partnerId);
-
-      io.to(partnerId).emit("partner_skipped");
+      io.to(partnerId).emit("message", data);
     }
-
-    socket.emit("partner_skipped");
-    console.log("skip_partner:", socket.id);
   });
 
-  // إذا انفصل المستخدم
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
-    removeFromWaiting(socket.id);
+    const index = waitingUsers.findIndex(s => s.id === socket.id);
+    if (index !== -1) {
+      waitingUsers.splice(index, 1);
+    }
 
     const partnerId = activeChats.get(socket.id);
     if (partnerId) {
