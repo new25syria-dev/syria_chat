@@ -229,6 +229,15 @@ const activeMatches = new Map();
 const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
 
+function logInfo(scope, message, extra = undefined) {
+  const prefix = `[${new Date().toISOString()}] [${scope}]`;
+  if (extra === undefined) {
+    console.log(`${prefix} ${message}`);
+    return;
+  }
+  console.log(`${prefix} ${message}`, extra);
+}
+
 function normalizeName(value) {
   return String(value || "").trim();
 }
@@ -391,14 +400,15 @@ async function sendFriendsStatus(requester, friends) {
       online: user?.online === true,
       lastSeen: user?.lastSeen
         ? new Date(user.lastSeen).toISOString()
-        : "غير معروف",
+        : "ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ",
     });
   }
 }
 
 async function sendMatchFound(userName, partnerName) {
   const partner = await getPublicUserProfile(partnerName);
-  await emitSystemMessage(userName, `تم العثور على ${partner.userName}`);
+  logInfo("match_found", `${userName} <= ${partner.userName}`);
+  await emitSystemMessage(userName, `ØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ ${partner.userName}`);
   await emitToUser(userName, "match_found", {
     partner,
   });
@@ -431,6 +441,11 @@ async function startMatchProposal(userA, userB) {
   pendingMatchByUser.set(userA, key);
   pendingMatchByUser.set(userB, key);
 
+  logInfo("match_proposal", `${userA} <-> ${userB}`, {
+    pendingMatches: pendingMatches.size,
+    queueLength: waitingQueue.length,
+  });
+
   await sendMatchFound(userA, userB);
   await sendMatchFound(userB, userA);
 }
@@ -441,8 +456,12 @@ async function confirmActiveMatch(userA, userB) {
   activeMatches.set(userA, userB);
   activeMatches.set(userB, userA);
 
-  await emitSystemMessage(userA, `تم بدء المحادثة مع ${userB}`);
-  await emitSystemMessage(userB, `تم بدء المحادثة مع ${userA}`);
+  logInfo("match_confirmed", `${userA} <-> ${userB}`, {
+    activeMatches: activeMatches.size / 2,
+  });
+
+  await emitSystemMessage(userA, `ØªÙ… Ø¨Ø¯Ø¡ Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø© Ù…Ø¹ ${userB}`);
+  await emitSystemMessage(userB, `ØªÙ… Ø¨Ø¯Ø¡ Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø© Ù…Ø¹ ${userA}`);
 
   await emitToUser(userA, "match_confirmed", {
     partnerName: userB,
@@ -473,7 +492,7 @@ async function closePendingMatchForUser(userName, reason, partnerReason) {
   return partner;
 }
 
-async function endMatch(userName, reason = "تم إنهاء المحادثة") {
+async function endMatch(userName, reason = "ØªÙ… Ø¥Ù†Ù‡Ø§Ø¡ Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø©") {
   const partner = activeMatches.get(userName);
   if (!partner) return;
 
@@ -481,7 +500,7 @@ async function endMatch(userName, reason = "تم إنهاء المحادثة") {
   activeMatches.delete(partner);
 
   await emitSystemMessage(userName, reason);
-  await emitSystemMessage(partner, "غادر الطرف الآخر");
+  await emitSystemMessage(partner, "ØºØ§Ø¯Ø± Ø§Ù„Ø·Ø±Ù Ø§Ù„Ø¢Ø®Ø±");
 }
 
 async function tryMatch(userName) {
@@ -489,12 +508,12 @@ async function tryMatch(userName) {
   if (!userName) return;
 
   if (activeMatches.has(userName)) {
-    await emitSystemMessage(userName, "أنت بالفعل في محادثة");
+    await emitSystemMessage(userName, "Ø£Ù†Øª Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ù…Ø­Ø§Ø¯Ø«Ø©");
     return;
   }
 
   if (pendingMatchByUser.has(userName)) {
-    await emitSystemMessage(userName, "تم العثور على شريك بانتظار قرارك");
+    await emitSystemMessage(userName, "ØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø´Ø±ÙŠÙƒ Ø¨Ø§Ù†ØªØ¸Ø§Ø± Ù‚Ø±Ø§Ø±Ùƒ");
     return;
   }
 
@@ -511,10 +530,14 @@ async function tryMatch(userName) {
   });
 
   if (partner) {
+    logInfo("match_try", `proposal candidate found for ${userName}: ${partner}`);
     await startMatchProposal(userName, partner);
   } else {
     waitingQueue.push(userName);
-    await emitSystemMessage(userName, "جاري البحث عن شريك...");
+    logInfo("match_try", `${userName} added to queue`, {
+      queueLength: waitingQueue.length,
+    });
+    await emitSystemMessage(userName, "Ø¬Ø§Ø±ÙŠ Ø§Ù„Ø¨Ø­Ø« Ø¹Ù† Ø´Ø±ÙŠÙƒ...");
   }
 }
 
@@ -589,6 +612,7 @@ app.get("/health", async (req, res) => {
 });
 
 io.on("connection", (socket) => {
+  logInfo("socket", `connected ${socket.id}`);
   socket.on("register_user", async (rawUserName) => {
     try {
       if (!isDbReady()) return;
@@ -599,6 +623,7 @@ io.on("connection", (socket) => {
       socket.data.userName = userName;
       socketToUser.set(socket.id, userName);
       await setUserOnline(userName, socket.id);
+      logInfo("register_user", `${userName} -> ${socket.id}`);
     } catch (err) {
       console.error("register_user error:", err);
     }
@@ -626,6 +651,7 @@ io.on("connection", (socket) => {
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
+      logInfo("find_partner", `${userName} requested match`);
       await tryMatch(userName);
     } catch (err) {
       console.error("find_partner error:", err);
@@ -650,11 +676,18 @@ io.on("connection", (socket) => {
 
       proposal.acceptedBy.add(userName);
       const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
+      logInfo("accept_match", `${userName} accepted`, {
+        partner,
+        acceptedBy: Array.from(proposal.acceptedBy),
+      });
 
       if (proposal.acceptedBy.size < 2) {
-        await emitSystemMessage(userName, "تم إرسال طلب الدخول. ننتظر الطرف الآخر");
+        await emitSystemMessage(userName, "???? ?????????? ?????? ????????????. ?????????? ?????????? ??????????");
         await emitToUser(userName, "match_waiting", { partnerName: partner });
-        await emitSystemMessage(partner, `${userName} جاهز للدخول إلى المحادثة`);
+        await emitSystemMessage(partner, `${userName} ???????? ???????????? ?????? ????????????????`);
+        await emitToUser(partner, "match_partner_ready", {
+          partnerName: userName,
+        });
         return;
       }
 
@@ -671,10 +704,12 @@ io.on("connection", (socket) => {
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
+      logInfo("cancel_find", `${userName} cancelled search`);
+
       const partner = await closePendingMatchForUser(
         userName,
-        "تم إيقاف البحث",
-        "الطرف الآخر أوقف البحث"
+        "???? ?????????? ??????????",
+        "?????????? ?????????? ???????? ??????????"
       );
       if (partner) {
         await tryMatch(partner);
@@ -682,7 +717,7 @@ io.on("connection", (socket) => {
       }
 
       removeFromQueue(userName);
-      await emitSystemMessage(userName, "تم إيقاف البحث");
+      await emitSystemMessage(userName, "???? ?????????? ??????????");
     } catch (err) {
       console.error("cancel_find error:", err);
     }
@@ -694,13 +729,32 @@ io.on("connection", (socket) => {
 
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
+      logInfo("skip_partner", `${userName} requested skip`);
 
-      const partner = await closePendingMatchForUser(
-        userName,
-        "تم التخطي",
-        "تم التخطي من الطرف الآخر"
-      );
-      if (partner) {
+      const pendingKey = pendingMatchByUser.get(userName);
+      if (pendingKey) {
+        const proposal = pendingMatches.get(pendingKey);
+        if (!proposal) {
+          pendingMatchByUser.delete(userName);
+          return;
+        }
+
+        const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
+
+        clearPendingProposal(proposal.userA, proposal.userB);
+        await emitSystemMessage(
+          userName,
+          "???? ????????????. ???????? ?????????? ???? ???????? ????????..."
+        );
+        await emitToUser(userName, "match_searching", {});
+        await emitSystemMessage(
+          partner,
+          "???? ???????????? ???? ?????????? ??????????"
+        );
+        await emitToUser(partner, "match_closed", {
+          reason: "???? ???????????? ???? ?????????? ??????????",
+        });
+
         await tryMatch(userName);
         await tryMatch(partner);
         return;
@@ -708,15 +762,20 @@ io.on("connection", (socket) => {
 
       const activePartner = activeMatches.get(userName);
       if (!activePartner) {
-        await emitSystemMessage(userName, "لا يوجد شريك لتخطيه");
+        await emitSystemMessage(userName, "???? ???????? ???????? ????????????");
         return;
       }
 
       activeMatches.delete(userName);
       activeMatches.delete(activePartner);
 
-      await emitSystemMessage(userName, "تم التخطي");
-      await emitSystemMessage(activePartner, "تم التخطي من الطرف الآخر");
+      await emitSystemMessage(
+        userName,
+        "???? ????????????. ???????? ?????????? ???? ???????? ????????..."
+      );
+      await emitToUser(userName, "match_searching", {});
+      await emitSystemMessage(activePartner, "???? ???????????? ???? ?????????? ??????????");
+      await emitToUser(activePartner, "match_searching", {});
 
       await tryMatch(userName);
       await tryMatch(activePartner);
@@ -732,7 +791,7 @@ io.on("connection", (socket) => {
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
-      await endMatch(userName, "تم إنهاء المحادثة");
+      await endMatch(userName, "ØªÙ… Ø¥Ù†Ù‡Ø§Ø¡ Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø©");
     } catch (err) {
       console.error("leave_chat error:", err);
     }
@@ -828,6 +887,7 @@ io.on("connection", (socket) => {
 
       await savePrivateMessage(payload);
       await emitToUser(to, "private_message_received", payload);
+      logInfo("private_message", `${from} -> ${to}`);
     } catch (err) {
       console.error("private_message error:", err);
     }
@@ -907,7 +967,7 @@ io.on("connection", (socket) => {
       if (alreadyFriends) {
         socket.emit("friend_request_response", {
           accepted: true,
-          message: "هذا المستخدم موجود بالفعل في قائمة أصدقائك",
+          message: "Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… Ù…ÙˆØ¬ÙˆØ¯ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ù‚Ø§Ø¦Ù…Ø© Ø£ØµØ¯Ù‚Ø§Ø¦Ùƒ",
         });
         return;
       }
@@ -924,10 +984,13 @@ io.on("connection", (socket) => {
           to,
           status: "pending",
         });
+        logInfo("friend_request", `${from} -> ${to} created`);
+      } else {
+        logInfo("friend_request", `${from} -> ${to} reused pending`);
       }
 
       socket.emit("friend_request_sent", {
-        message: "تم إرسال طلب الصداقة",
+        message: "ØªÙ… Ø¥Ø±Ø³Ø§Ù„ Ø·Ù„Ø¨ Ø§Ù„ØµØ¯Ø§Ù‚Ø©",
       });
 
       await emitToUser(to, "friend_request_received", { from });
@@ -955,7 +1018,7 @@ io.on("connection", (socket) => {
       if (!requestDoc) {
         socket.emit("friend_request_response", {
           accepted: false,
-          message: "طلب الصداقة غير موجود",
+          message: "Ø·Ù„Ø¨ Ø§Ù„ØµØ¯Ø§Ù‚Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯",
         });
         return;
       }
@@ -965,21 +1028,23 @@ io.on("connection", (socket) => {
         await requestDoc.save();
 
         await createFriendship(from, responder);
+        logInfo("friend_request", `${responder} accepted ${from}`);
 
         socket.emit("friend_added_successfully", from);
 
         await emitToUser(from, "friend_added_successfully", responder);
         await emitToUser(from, "friend_request_response", {
           accepted: true,
-          message: `وافق ${responder} على طلب الصداقة`,
+          message: `ÙˆØ§ÙÙ‚ ${responder} Ø¹Ù„Ù‰ Ø·Ù„Ø¨ Ø§Ù„ØµØ¯Ø§Ù‚Ø©`,
         });
       } else {
         requestDoc.status = "rejected";
         await requestDoc.save();
+        logInfo("friend_request", `${responder} rejected ${from}`);
 
         await emitToUser(from, "friend_request_response", {
           accepted: false,
-          message: `رفض ${responder} طلب الصداقة`,
+          message: `Ø±ÙØ¶ ${responder} Ø·Ù„Ø¨ Ø§Ù„ØµØ¯Ø§Ù‚Ø©`,
         });
       }
     } catch (err) {
@@ -1032,12 +1097,12 @@ io.on("connection", (socket) => {
       await deleteFriendship(me, friend);
 
       socket.emit("friend_deleted_successfully", {
-        message: `تم حذف ${friend} من قائمة الأصدقاء`,
+        message: `ØªÙ… Ø­Ø°Ù ${friend} Ù…Ù† Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø£ØµØ¯Ù‚Ø§Ø¡`,
       });
 
       await emitToUser(friend, "friend_deleted_me", {
         from: me,
-        message: `قام ${me} بحذفك من قائمة الأصدقاء`,
+        message: `Ù‚Ø§Ù… ${me} Ø¨Ø­Ø°ÙÙƒ Ù…Ù† Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø£ØµØ¯Ù‚Ø§Ø¡`,
       });
     } catch (err) {
       console.error("delete_friend error:", err);
@@ -1061,7 +1126,7 @@ io.on("connection", (socket) => {
             const partner =
               proposal.userA === userName ? proposal.userB : proposal.userA;
             clearPendingProposal(proposal.userA, proposal.userB);
-            await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
+            await emitSystemMessage(partner, "Ø§Ù†Ù‚Ø·Ø¹ Ø§ØªØµØ§Ù„ Ø§Ù„Ø·Ø±Ù Ø§Ù„Ø¢Ø®Ø±");
             await emitToUser(partner, "match_closed", {
               reason: "partner_disconnected",
             });
@@ -1073,11 +1138,12 @@ io.on("connection", (socket) => {
         if (partner) {
           activeMatches.delete(userName);
           activeMatches.delete(partner);
-          await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
+          await emitSystemMessage(partner, "Ø§Ù†Ù‚Ø·Ø¹ Ø§ØªØµØ§Ù„ Ø§Ù„Ø·Ø±Ù Ø§Ù„Ø¢Ø®Ø±");
         }
       }
 
       socketToUser.delete(socket.id);
+      logInfo("socket", `disconnected ${socket.id}`, { userName });
     } catch (err) {
       console.error("disconnect error:", err);
     }
@@ -1090,8 +1156,9 @@ async function startServer() {
       serverSelectionTimeoutMS: 15000,
     });
 
+    logInfo("startup", "MongoDB connected");
     server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      logInfo("startup", `Server running on port ${PORT}`);
     });
   } catch (err) {
     console.error("MongoDB connection failed:");
@@ -1101,3 +1168,4 @@ async function startServer() {
 }
 
 startServer();
+
