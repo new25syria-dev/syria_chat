@@ -298,7 +298,7 @@ async function setUserOnline(userName, socketId) {
         lastSeen: new Date(),
       },
     },
-    { upsert: true, new: true, returnDocument: "after" }
+    { upsert: true, returnDocument: "after" }
   );
 }
 
@@ -335,7 +335,7 @@ async function syncUserProfile(userName, data = {}) {
         lastSeen: new Date(),
       },
     },
-    { upsert: true, new: true, returnDocument: "after" }
+    { upsert: true, returnDocument: "after" }
   );
 }
 
