@@ -2,10 +2,13 @@ const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
 
-// تحميل ملف .nenv
-const nenvPath = path.join(__dirname, ".nenv");
-if (fs.existsSync(nenvPath)) {
-  dotenv.config({ path: nenvPath });
+const envCandidates = [".env", ".nenv", ".env.txt"];
+const envPath = envCandidates
+  .map((name) => path.join(__dirname, name))
+  .find((candidate) => fs.existsSync(candidate));
+
+if (envPath) {
+  dotenv.config({ path: envPath });
 } else {
   dotenv.config();
 }
@@ -29,26 +32,17 @@ const io = new Server(server, {
   },
 });
 
-/* =========================
-   Config
-========================= */
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
 
 if (!DATABASE_URL) {
-  console.error("❌ DATABASE_URL is missing in .nenv");
+  console.error("DATABASE_URL is missing in your environment file");
   process.exit(1);
 }
 
-/* =========================
-   MongoDB settings
-========================= */
 mongoose.set("strictQuery", true);
 mongoose.set("bufferCommands", false);
 
-/* =========================
-   Schemas
-========================= */
 const userSchema = new mongoose.Schema(
   {
     userName: {
@@ -175,21 +169,66 @@ const privateMessageSchema = new mongoose.Schema(
 
 privateMessageSchema.index({ conversationKey: 1, time: 1 });
 
+const randomChatMessageSchema = new mongoose.Schema(
+  {
+    from: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    to: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    type: {
+      type: String,
+      enum: ["text", "image"],
+      required: true,
+      index: true,
+    },
+    text: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    image: {
+      type: String,
+      default: "",
+    },
+    time: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+    conversationKey: {
+      type: String,
+      required: true,
+      index: true,
+    },
+  },
+  { timestamps: true }
+);
+
+randomChatMessageSchema.index({ conversationKey: 1, time: 1 });
+
 const User = mongoose.model("User", userSchema);
 const Friendship = mongoose.model("Friendship", friendshipSchema);
 const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
+const RandomChatMessage = mongoose.model(
+  "RandomChatMessage",
+  randomChatMessageSchema
+);
 
-/* =========================
-   Runtime memory
-========================= */
 const socketToUser = new Map();
 const waitingQueue = [];
 const activeMatches = new Map();
+const pendingMatches = new Map();
+const pendingMatchByUser = new Map();
 
-/* =========================
-   Helpers
-========================= */
 function normalizeName(value) {
   return String(value || "").trim();
 }
@@ -213,6 +252,13 @@ function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
 
+function clearPendingProposal(userA, userB) {
+  const key = pairKey(userA, userB);
+  pendingMatches.delete(key);
+  pendingMatchByUser.delete(userA);
+  pendingMatchByUser.delete(userB);
+}
+
 async function getUserSocket(userName) {
   const user = await User.findOne({ userName: normalizeName(userName) }).lean();
   if (!user || !user.socketId) return null;
@@ -221,18 +267,24 @@ async function getUserSocket(userName) {
 
 async function emitToUser(userName, event, payload) {
   const socket = await getUserSocket(userName);
-
-  if (!socket) {
-    console.log(`⚠️ emit failed -> ${userName}, event=${event}`);
-    return;
-  }
-
-  console.log(`📤 emit ${event} -> ${userName} (${socket.id})`);
+  if (!socket) return;
   socket.emit(event, payload);
 }
 
 async function emitSystemMessage(userName, message) {
   await emitToUser(userName, "system_msg", message);
+}
+
+async function getPublicUserProfile(userName) {
+  const cleanName = normalizeName(userName);
+  const user = await User.findOne({ userName: cleanName }).lean();
+
+  return {
+    userName: user?.userName || cleanName,
+    profileImage: user?.profileImage || "",
+    country: user?.country || "",
+    age: user?.age ?? null,
+  };
 }
 
 async function setUserOnline(userName, socketId) {
@@ -261,6 +313,29 @@ async function setUserOffline(userName) {
       },
     },
     { returnDocument: "after" }
+  );
+}
+
+async function syncUserProfile(userName, data = {}) {
+  const cleanName = normalizeName(userName);
+  const rawAge = data.age;
+  const parsedAge =
+    rawAge === null || rawAge === undefined || rawAge === ""
+      ? null
+      : Number(rawAge);
+
+  await User.findOneAndUpdate(
+    { userName: cleanName },
+    {
+      $set: {
+        userName: cleanName,
+        profileImage: String(data.profileImage || "").trim(),
+        country: String(data.country || "").trim(),
+        age: Number.isFinite(parsedAge) ? parsedAge : null,
+        lastSeen: new Date(),
+      },
+    },
+    { upsert: true, new: true, returnDocument: "after" }
   );
 }
 
@@ -321,38 +396,81 @@ async function sendFriendsStatus(requester, friends) {
   }
 }
 
-async function startMatch(userA, userB) {
+async function sendMatchFound(userName, partnerName) {
+  const partner = await getPublicUserProfile(partnerName);
+  await emitSystemMessage(userName, `تم العثور على ${partner.userName}`);
+  await emitToUser(userName, "match_found", {
+    partner,
+  });
+}
+
+async function startMatchProposal(userA, userB) {
   userA = normalizeName(userA);
   userB = normalizeName(userB);
 
   if (!userA || !userB || userA === userB) return;
-  if (activeMatches.has(userA) || activeMatches.has(userB)) {
-    console.log(`⚠️ match skipped, already matched: ${userA}, ${userB}`);
+  if (
+    activeMatches.has(userA) ||
+    activeMatches.has(userB) ||
+    pendingMatchByUser.has(userA) ||
+    pendingMatchByUser.has(userB)
+  ) {
     return;
   }
 
   removeFromQueue(userA);
   removeFromQueue(userB);
 
+  const key = pairKey(userA, userB);
+  pendingMatches.set(key, {
+    key,
+    userA,
+    userB,
+    acceptedBy: new Set(),
+  });
+  pendingMatchByUser.set(userA, key);
+  pendingMatchByUser.set(userB, key);
+
+  await sendMatchFound(userA, userB);
+  await sendMatchFound(userB, userA);
+}
+
+async function confirmActiveMatch(userA, userB) {
+  clearPendingProposal(userA, userB);
+
   activeMatches.set(userA, userB);
   activeMatches.set(userB, userA);
 
-  console.log(`✅ Match started: ${userA} <-> ${userB}`);
+  await emitSystemMessage(userA, `تم بدء المحادثة مع ${userB}`);
+  await emitSystemMessage(userB, `تم بدء المحادثة مع ${userA}`);
 
-  await emitSystemMessage(userA, `تم العثور على صديق: ${userB}`);
-  await emitSystemMessage(userB, `تم العثور على صديق: ${userA}`);
-
-  await emitToUser(userA, "chat_started", {
-    partnerId: userB,
+  await emitToUser(userA, "match_confirmed", {
     partnerName: userB,
   });
-
-  await emitToUser(userB, "chat_started", {
-    partnerId: userA,
+  await emitToUser(userB, "match_confirmed", {
     partnerName: userA,
   });
+}
 
-  console.log(`📨 chat_started sent to both: ${userA}, ${userB}`);
+async function closePendingMatchForUser(userName, reason, partnerReason) {
+  const pendingKey = pendingMatchByUser.get(userName);
+  if (!pendingKey) return null;
+
+  const proposal = pendingMatches.get(pendingKey);
+  if (!proposal) {
+    pendingMatchByUser.delete(userName);
+    return null;
+  }
+
+  const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
+
+  clearPendingProposal(proposal.userA, proposal.userB);
+  await emitSystemMessage(userName, reason);
+  await emitToUser(userName, "match_closed", { reason });
+  await emitSystemMessage(partner, partnerReason);
+  await emitToUser(partner, "match_closed", { reason: partnerReason });
+
+  return partner;
 }
 
 async function endMatch(userName, reason = "تم إنهاء المحادثة") {
@@ -375,19 +493,28 @@ async function tryMatch(userName) {
     return;
   }
 
+  if (pendingMatchByUser.has(userName)) {
+    await emitSystemMessage(userName, "تم العثور على شريك بانتظار قرارك");
+    return;
+  }
+
   removeFromQueue(userName);
 
-  const partner = waitingQueue.find((u) => {
-    const other = normalizeName(u);
-    return other && other !== userName && !activeMatches.has(other);
+  const partner = waitingQueue.find((candidate) => {
+    const other = normalizeName(candidate);
+    return (
+      other &&
+      other !== userName &&
+      !activeMatches.has(other) &&
+      !pendingMatchByUser.has(other)
+    );
   });
 
   if (partner) {
-    await startMatch(userName, partner);
+    await startMatchProposal(userName, partner);
   } else {
     waitingQueue.push(userName);
     await emitSystemMessage(userName, "جاري البحث عن شريك...");
-    console.log(`🔍 Added to queue: ${userName}`);
   }
 }
 
@@ -404,9 +531,18 @@ async function savePrivateMessage({ from, to, text, time }) {
   });
 }
 
-/* =========================
-   Routes
-========================= */
+async function saveRandomChatMessage({ from, to, type, text = "", image = "" }) {
+  return RandomChatMessage.create({
+    from,
+    to,
+    type,
+    text,
+    image,
+    time: new Date(),
+    conversationKey: conversationKey(from, to),
+  });
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -429,6 +565,7 @@ app.get("/health", async (req, res) => {
     const friendships = await Friendship.countDocuments();
     const friendRequests = await FriendRequest.countDocuments();
     const messages = await PrivateMessage.countDocuments();
+    const randomMessages = await RandomChatMessage.countDocuments();
 
     res.json({
       ok: true,
@@ -437,8 +574,10 @@ app.get("/health", async (req, res) => {
       friendships,
       friendRequests,
       messages,
+      randomMessages,
       waitingQueueLength: waitingQueue.length,
       activeMatchesLength: activeMatches.size,
+      pendingMatchesLength: pendingMatches.size,
     });
   } catch (err) {
     res.status(500).json({
@@ -449,12 +588,7 @@ app.get("/health", async (req, res) => {
   }
 });
 
-/* =========================
-   Socket
-========================= */
 io.on("connection", (socket) => {
-  console.log("🟢 Socket connected:", socket.id);
-
   socket.on("register_user", async (rawUserName) => {
     try {
       if (!isDbReady()) return;
@@ -464,12 +598,24 @@ io.on("connection", (socket) => {
 
       socket.data.userName = userName;
       socketToUser.set(socket.id, userName);
-
       await setUserOnline(userName, socket.id);
-
-      console.log(`✅ register_user: ${userName} -> ${socket.id}`);
     } catch (err) {
       console.error("register_user error:", err);
+    }
+  });
+
+  socket.on("sync_profile", async (data) => {
+    try {
+      if (!isDbReady()) return;
+
+      const userName = normalizeName(data?.userName || socket.data.userName);
+      if (!userName) return;
+
+      socket.data.userName = userName;
+      socketToUser.set(socket.id, userName);
+      await syncUserProfile(userName, data);
+    } catch (err) {
+      console.error("sync_profile error:", err);
     }
   });
 
@@ -480,14 +626,65 @@ io.on("connection", (socket) => {
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
-      if (activeMatches.has(userName)) {
-        await emitSystemMessage(userName, "أنت بالفعل في محادثة");
-        return;
-      }
-
       await tryMatch(userName);
     } catch (err) {
       console.error("find_partner error:", err);
+    }
+  });
+
+  socket.on("accept_match", async () => {
+    try {
+      if (!isDbReady()) return;
+
+      const userName = socket.data.userName || socketToUser.get(socket.id);
+      if (!userName) return;
+
+      const pendingKey = pendingMatchByUser.get(userName);
+      if (!pendingKey) return;
+
+      const proposal = pendingMatches.get(pendingKey);
+      if (!proposal) {
+        pendingMatchByUser.delete(userName);
+        return;
+      }
+
+      proposal.acceptedBy.add(userName);
+      const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
+
+      if (proposal.acceptedBy.size < 2) {
+        await emitSystemMessage(userName, "تم إرسال طلب الدخول. ننتظر الطرف الآخر");
+        await emitToUser(userName, "match_waiting", { partnerName: partner });
+        await emitSystemMessage(partner, `${userName} جاهز للدخول إلى المحادثة`);
+        return;
+      }
+
+      await confirmActiveMatch(proposal.userA, proposal.userB);
+    } catch (err) {
+      console.error("accept_match error:", err);
+    }
+  });
+
+  socket.on("cancel_find", async () => {
+    try {
+      if (!isDbReady()) return;
+
+      const userName = socket.data.userName || socketToUser.get(socket.id);
+      if (!userName) return;
+
+      const partner = await closePendingMatchForUser(
+        userName,
+        "تم إيقاف البحث",
+        "الطرف الآخر أوقف البحث"
+      );
+      if (partner) {
+        await tryMatch(partner);
+        return;
+      }
+
+      removeFromQueue(userName);
+      await emitSystemMessage(userName, "تم إيقاف البحث");
+    } catch (err) {
+      console.error("cancel_find error:", err);
     }
   });
 
@@ -498,21 +695,31 @@ io.on("connection", (socket) => {
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
 
-      const partner = activeMatches.get(userName);
+      const partner = await closePendingMatchForUser(
+        userName,
+        "تم التخطي",
+        "تم التخطي من الطرف الآخر"
+      );
+      if (partner) {
+        await tryMatch(userName);
+        await tryMatch(partner);
+        return;
+      }
 
-      if (!partner) {
+      const activePartner = activeMatches.get(userName);
+      if (!activePartner) {
         await emitSystemMessage(userName, "لا يوجد شريك لتخطيه");
         return;
       }
 
       activeMatches.delete(userName);
-      activeMatches.delete(partner);
+      activeMatches.delete(activePartner);
 
       await emitSystemMessage(userName, "تم التخطي");
-      await emitSystemMessage(partner, "تم التخطي من الطرف الآخر");
+      await emitSystemMessage(activePartner, "تم التخطي من الطرف الآخر");
 
       await tryMatch(userName);
-      await tryMatch(partner);
+      await tryMatch(activePartner);
     } catch (err) {
       console.error("skip_partner error:", err);
     }
@@ -540,6 +747,12 @@ io.on("connection", (socket) => {
 
       if (!sender || !partner || !msg) return;
 
+      await saveRandomChatMessage({
+        from: sender,
+        to: partner,
+        type: "text",
+        text: String(msg),
+      });
       await emitToUser(partner, "message", String(msg));
     } catch (err) {
       console.error("message error:", err);
@@ -555,6 +768,12 @@ io.on("connection", (socket) => {
 
       if (!sender || !partner || !imgBase64) return;
 
+      await saveRandomChatMessage({
+        from: sender,
+        to: partner,
+        type: "image",
+        image: String(imgBase64),
+      });
       await emitToUser(partner, "image", imgBase64);
     } catch (err) {
       console.error("image error:", err);
@@ -598,10 +817,7 @@ io.on("connection", (socket) => {
       const text = String(data?.text || "").trim();
       const time = data?.time || new Date().toISOString();
 
-      if (!from || !to || !text) {
-        console.log("⚠️ Invalid private_message payload:", data);
-        return;
-      }
+      if (!from || !to || !text) return;
 
       const payload = {
         from,
@@ -612,8 +828,6 @@ io.on("connection", (socket) => {
 
       await savePrivateMessage(payload);
       await emitToUser(to, "private_message_received", payload);
-
-      console.log(`✅ private_message saved and forwarded: ${from} -> ${to}`);
     } catch (err) {
       console.error("private_message error:", err);
     }
@@ -683,7 +897,9 @@ io.on("connection", (socket) => {
       if (!isDbReady()) return;
 
       const from = normalizeName(data?.from || socket.data.userName);
-      const to = normalizeName(data?.to);
+      const to = normalizeName(
+        data?.to || activeMatches.get(from) || pendingMatches.get(pendingMatchByUser.get(from))?.userA
+      );
 
       if (!from || !to || from === to) return;
 
@@ -807,7 +1023,9 @@ io.on("connection", (socket) => {
       if (!isDbReady()) return;
 
       const me = socket.data.userName || socketToUser.get(socket.id);
-      const friend = normalizeName(data?.friend);
+      const friend = normalizeName(
+        typeof data === "string" ? data : data?.friend
+      );
 
       if (!me || !friend) return;
 
@@ -836,6 +1054,21 @@ io.on("connection", (socket) => {
         await setUserOffline(userName);
         removeFromQueue(userName);
 
+        const pendingKey = pendingMatchByUser.get(userName);
+        if (pendingKey) {
+          const proposal = pendingMatches.get(pendingKey);
+          if (proposal) {
+            const partner =
+              proposal.userA === userName ? proposal.userB : proposal.userA;
+            clearPendingProposal(proposal.userA, proposal.userB);
+            await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
+            await emitToUser(partner, "match_closed", {
+              reason: "partner_disconnected",
+            });
+            await tryMatch(partner);
+          }
+        }
+
         const partner = activeMatches.get(userName);
         if (partner) {
           activeMatches.delete(userName);
@@ -845,29 +1078,23 @@ io.on("connection", (socket) => {
       }
 
       socketToUser.delete(socket.id);
-      console.log("🔴 Socket disconnected:", socket.id, "user:", userName);
     } catch (err) {
       console.error("disconnect error:", err);
     }
   });
 });
 
-/* =========================
-   Start after DB connection
-========================= */
 async function startServer() {
   try {
-    console.log("⏳ Connecting to MongoDB...");
     await mongoose.connect(DATABASE_URL, {
       serverSelectionTimeoutMS: 15000,
     });
 
-    console.log("✅ MongoDB connected");
     server.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`Server running on port ${PORT}`);
     });
   } catch (err) {
-    console.error("❌ MongoDB connection failed:");
+    console.error("MongoDB connection failed:");
     console.error(err.message);
     process.exit(1);
   }
