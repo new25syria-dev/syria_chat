@@ -1,8 +1,25 @@
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
+
+// تحميل ملف .nenv
+const nenvPath = path.join(__dirname, ".nenv");
+if (fs.existsSync(nenvPath)) {
+  dotenv.config({ path: nenvPath });
+} else {
+  dotenv.config();
+}
+
 const express = require("express");
 const http = require("http");
+const cors = require("cors");
+const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -12,487 +29,748 @@ const io = new Server(server, {
   },
 });
 
-app.get("/", (req, res) => {
-  res.send("Socket server is running");
-});
+/* =========================
+   Config
+========================= */
+const PORT = process.env.PORT || 3000;
+const MONGO_URI =
+  process.env.DATABASE_URL ||
+  process.env.MONGO_URI ||
+  "mongodb://127.0.0.1:27017/fadfad_chat_db";
 
-/**
- * usersByName:
- * {
- *   "sam": { socketId: "...", online: true, lastSeen: "..." }
- * }
- */
-const usersByName = new Map();
+/* =========================
+   MongoDB
+========================= */
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-/**
- * nameBySocketId:
- * socket.id => userName
- */
-const nameBySocketId = new Map();
+/* =========================
+   Schemas
+========================= */
+const userSchema = new mongoose.Schema(
+  {
+    userName: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      index: true,
+    },
+    socketId: {
+      type: String,
+      default: null,
+    },
+    online: {
+      type: Boolean,
+      default: false,
+    },
+    lastSeen: {
+      type: Date,
+      default: Date.now,
+    },
+    profileImage: {
+      type: String,
+      default: "",
+    },
+    country: {
+      type: String,
+      default: "",
+    },
+    age: {
+      type: Number,
+      default: null,
+    },
+  },
+  { timestamps: true }
+);
 
-/**
- * waitingQueue:
- * users waiting for random match
- */
+const friendshipSchema = new mongoose.Schema(
+  {
+    userA: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    userB: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    pairKey: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+  },
+  { timestamps: true }
+);
+
+const friendRequestSchema = new mongoose.Schema(
+  {
+    from: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    to: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "accepted", "rejected"],
+      default: "pending",
+      index: true,
+    },
+  },
+  { timestamps: true }
+);
+
+friendRequestSchema.index({ from: 1, to: 1, status: 1 });
+
+const privateMessageSchema = new mongoose.Schema(
+  {
+    from: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    to: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    text: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    time: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+    conversationKey: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    readBy: {
+      type: [String],
+      default: [],
+    },
+  },
+  { timestamps: true }
+);
+
+privateMessageSchema.index({ conversationKey: 1, time: 1 });
+
+const User = mongoose.model("User", userSchema);
+const Friendship = mongoose.model("Friendship", friendshipSchema);
+const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
+const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
+
+/* =========================
+   Runtime memory
+========================= */
+const socketToUser = new Map();
 const waitingQueue = [];
-
-/**
- * activeMatches:
- * userName => partnerUserName
- */
 const activeMatches = new Map();
 
-/**
- * privateHistories:
- * conversationKey => [{ from, to, text, time }]
- */
-const privateHistories = new Map();
-
-/**
- * friendRequests:
- * toUser => [{ from, time }]
- */
-const friendRequests = new Map();
-
-/**
- * friendsMap:
- * userName => Set(friendNames)
- */
-const friendsMap = new Map();
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
+/* =========================
+   Helpers
+========================= */
 function normalizeName(value) {
   return String(value || "").trim();
 }
 
-function ensureFriendSet(user) {
-  if (!friendsMap.has(user)) {
-    friendsMap.set(user, new Set());
-  }
-  return friendsMap.get(user);
-}
-
-function conversationKey(a, b) {
-  const x = normalizeName(a);
-  const y = normalizeName(b);
+function pairKey(a, b) {
+  const x = normalizeName(a).toLowerCase();
+  const y = normalizeName(b).toLowerCase();
   return [x, y].sort().join("__");
 }
 
-function getUserSocket(userName) {
-  const record = usersByName.get(normalizeName(userName));
-  if (!record || !record.socketId) return null;
-  return io.sockets.sockets.get(record.socketId) || null;
+function conversationKey(a, b) {
+  return pairKey(a, b);
 }
 
-function removeFromWaitingQueue(userName) {
-  const index = waitingQueue.indexOf(userName);
-  if (index !== -1) {
-    waitingQueue.splice(index, 1);
-  }
+function removeFromQueue(userName) {
+  const i = waitingQueue.indexOf(userName);
+  if (i !== -1) waitingQueue.splice(i, 1);
 }
 
-function emitSystemMessage(userName, message) {
-  const socket = getUserSocket(userName);
-  if (socket) {
-    socket.emit("system_msg", message);
-  }
+async function getUserSocket(userName) {
+  const user = await User.findOne({ userName: normalizeName(userName) }).lean();
+  if (!user || !user.socketId) return null;
+  return io.sockets.sockets.get(user.socketId) || null;
 }
 
-function endMatchFor(userName, reason = "تم إنهاء المحادثة") {
-  const partner = activeMatches.get(userName);
-  if (!partner) return;
-
-  activeMatches.delete(userName);
-  activeMatches.delete(partner);
-
-  emitSystemMessage(userName, reason);
-  emitSystemMessage(partner, "غادر الطرف الآخر");
-
-  console.log(`❌ Match ended: ${userName} <-> ${partner}`);
+async function emitToUser(userName, event, payload) {
+  const socket = await getUserSocket(userName);
+  if (socket) socket.emit(event, payload);
 }
 
-function startMatch(userA, userB) {
-  removeFromWaitingQueue(userA);
-  removeFromWaitingQueue(userB);
-
-  activeMatches.set(userA, userB);
-  activeMatches.set(userB, userA);
-
-  emitSystemMessage(userA, `تم العثور على صديق: ${userB}`);
-  emitSystemMessage(userB, `تم العثور على صديق: ${userA}`);
-
-  const socketA = getUserSocket(userA);
-  const socketB = getUserSocket(userB);
-
-  if (socketA) {
-    socketA.emit("chat_started", {
-      partnerId: userB,
-      partnerName: userB,
-    });
-  }
-
-  if (socketB) {
-    socketB.emit("chat_started", {
-      partnerId: userA,
-      partnerName: userA,
-    });
-  }
-
-  console.log(`✅ Match started: ${userA} <-> ${userB}`);
+async function emitSystemMessage(userName, message) {
+  await emitToUser(userName, "system_msg", message);
 }
 
-function tryMatchUser(userName) {
-  const cleanName = normalizeName(userName);
-  if (!cleanName) return;
-
-  if (activeMatches.has(cleanName)) {
-    emitSystemMessage(cleanName, "أنت بالفعل في محادثة");
-    return;
-  }
-
-  removeFromWaitingQueue(cleanName);
-
-  const partner = waitingQueue.find((u) => u !== cleanName);
-
-  if (partner) {
-    startMatch(cleanName, partner);
-  } else {
-    waitingQueue.push(cleanName);
-    emitSystemMessage(cleanName, "جاري البحث عن شريك...");
-    console.log(`🔍 ${cleanName} added to waiting queue`);
-  }
+async function setUserOnline(userName, socketId) {
+  await User.findOneAndUpdate(
+    { userName },
+    {
+      $set: {
+        userName,
+        socketId,
+        online: true,
+        lastSeen: new Date(),
+      },
+    },
+    { upsert: true, new: true }
+  );
 }
 
-function savePrivateMessage(from, to, text, time) {
-  const key = conversationKey(from, to);
-  if (!privateHistories.has(key)) {
-    privateHistories.set(key, []);
-  }
+async function setUserOffline(userName) {
+  await User.findOneAndUpdate(
+    { userName },
+    {
+      $set: {
+        socketId: null,
+        online: false,
+        lastSeen: new Date(),
+      },
+    }
+  );
+}
 
-  privateHistories.get(key).push({
-    from,
-    to,
-    text,
-    time,
+async function areFriends(userA, userB) {
+  const key = pairKey(userA, userB);
+  const friendship = await Friendship.findOne({ pairKey: key }).lean();
+  return !!friendship;
+}
+
+async function createFriendship(userA, userB) {
+  const a = normalizeName(userA);
+  const b = normalizeName(userB);
+  const key = pairKey(a, b);
+
+  const existing = await Friendship.findOne({ pairKey: key }).lean();
+  if (existing) return existing;
+
+  return Friendship.create({
+    userA: a,
+    userB: b,
+    pairKey: key,
   });
 }
 
-function sendFriendsStatus(requester, friends) {
-  const requesterSocket = getUserSocket(requester);
+async function deleteFriendship(userA, userB) {
+  const key = pairKey(userA, userB);
+  await Friendship.deleteOne({ pairKey: key });
+}
+
+async function getFriendsList(userName) {
+  const rows = await Friendship.find({
+    $or: [{ userA: userName }, { userB: userName }],
+  }).lean();
+
+  return rows
+    .map((row) => (row.userA === userName ? row.userB : row.userA))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function sendFriendsStatus(requester, friends) {
+  const requesterSocket = await getUserSocket(requester);
   if (!requesterSocket) return;
 
   for (const friend of friends) {
     const cleanFriend = normalizeName(friend);
     if (!cleanFriend) continue;
 
-    const friendRecord = usersByName.get(cleanFriend);
+    const user = await User.findOne({ userName: cleanFriend }).lean();
+
     requesterSocket.emit("update_status", {
       user: cleanFriend,
-      online: !!friendRecord?.online,
-      lastSeen: friendRecord?.lastSeen || "غير معروف",
+      online: user?.online === true,
+      lastSeen: user?.lastSeen
+        ? new Date(user.lastSeen).toISOString()
+        : "غير معروف",
     });
   }
 }
 
-io.on("connection", (socket) => {
-  console.log("🟢 New socket connected:", socket.id);
+async function startMatch(userA, userB) {
+  removeFromQueue(userA);
+  removeFromQueue(userB);
 
-  socket.on("register_user", (userNameRaw) => {
-    const userName = normalizeName(userNameRaw);
-    if (!userName) return;
+  activeMatches.set(userA, userB);
+  activeMatches.set(userB, userA);
 
-    nameBySocketId.set(socket.id, userName);
-    usersByName.set(userName, {
-      socketId: socket.id,
-      online: true,
-      lastSeen: nowIso(),
+  await emitSystemMessage(userA, `تم العثور على صديق: ${userB}`);
+  await emitSystemMessage(userB, `تم العثور على صديق: ${userA}`);
+
+  await emitToUser(userA, "chat_started", {
+    partnerId: userB,
+    partnerName: userB,
+  });
+
+  await emitToUser(userB, "chat_started", {
+    partnerId: userA,
+    partnerName: userA,
+  });
+
+  console.log(`✅ Match started: ${userA} <-> ${userB}`);
+}
+
+async function endMatch(userName, reason = "تم إنهاء المحادثة") {
+  const partner = activeMatches.get(userName);
+  if (!partner) return;
+
+  activeMatches.delete(userName);
+  activeMatches.delete(partner);
+
+  await emitSystemMessage(userName, reason);
+  await emitSystemMessage(partner, "غادر الطرف الآخر");
+}
+
+async function tryMatch(userName) {
+  if (!userName) return;
+
+  if (activeMatches.has(userName)) {
+    await emitSystemMessage(userName, "أنت بالفعل في محادثة");
+    return;
+  }
+
+  removeFromQueue(userName);
+  const partner = waitingQueue.find((u) => u !== userName);
+
+  if (partner) {
+    await startMatch(userName, partner);
+  } else {
+    waitingQueue.push(userName);
+    await emitSystemMessage(userName, "جاري البحث عن شريك...");
+  }
+}
+
+async function savePrivateMessage({ from, to, text, time }) {
+  const t = time ? new Date(time) : new Date();
+
+  return PrivateMessage.create({
+    from,
+    to,
+    text,
+    time: t,
+    conversationKey: conversationKey(from, to),
+    readBy: [from],
+  });
+}
+
+/* =========================
+   Routes
+========================= */
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    message: "FadFad server running",
+  });
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    const users = await User.countDocuments();
+    const friendships = await Friendship.countDocuments();
+    const friendRequests = await FriendRequest.countDocuments();
+    const messages = await PrivateMessage.countDocuments();
+
+    res.json({
+      ok: true,
+      users,
+      friendships,
+      friendRequests,
+      messages,
+      waitingQueueLength: waitingQueue.length,
+      activeMatchesLength: activeMatches.size,
     });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+    });
+  }
+});
 
-    socket.data.userName = userName;
+/* =========================
+   Socket
+========================= */
+io.on("connection", (socket) => {
+  console.log("🟢 Socket connected:", socket.id);
 
-    console.log(`✅ register_user: ${userName} -> ${socket.id}`);
+  socket.on("register_user", async (rawUserName) => {
+    try {
+      const userName = normalizeName(rawUserName);
+      if (!userName) return;
+
+      socket.data.userName = userName;
+      socketToUser.set(socket.id, userName);
+
+      await setUserOnline(userName, socket.id);
+
+      console.log(`✅ register_user: ${userName} -> ${socket.id}`);
+    } catch (err) {
+      console.error("register_user error:", err);
+    }
   });
 
-  socket.on("find_partner", () => {
-    const userName = socket.data.userName || nameBySocketId.get(socket.id);
-    if (!userName) return;
-
-    tryMatchUser(userName);
+  socket.on("find_partner", async () => {
+    try {
+      const userName = socket.data.userName || socketToUser.get(socket.id);
+      if (!userName) return;
+      await tryMatch(userName);
+    } catch (err) {
+      console.error("find_partner error:", err);
+    }
   });
 
-  socket.on("skip_partner", () => {
-    const userName = socket.data.userName || nameBySocketId.get(socket.id);
-    if (!userName) return;
+  socket.on("skip_partner", async () => {
+    try {
+      const userName = socket.data.userName || socketToUser.get(socket.id);
+      if (!userName) return;
 
-    const partner = activeMatches.get(userName);
-    if (partner) {
+      const partner = activeMatches.get(userName);
+
+      if (!partner) {
+        await emitSystemMessage(userName, "لا يوجد شريك لتخطيه");
+        return;
+      }
+
       activeMatches.delete(userName);
       activeMatches.delete(partner);
 
-      emitSystemMessage(userName, "تم التخطي");
-      emitSystemMessage(partner, "تم التخطي من الطرف الآخر");
+      await emitSystemMessage(userName, "تم التخطي");
+      await emitSystemMessage(partner, "تم التخطي من الطرف الآخر");
 
-      tryMatchUser(userName);
-      tryMatchUser(partner);
-    } else {
-      emitSystemMessage(userName, "لا يوجد شريك لتخطيه");
+      await tryMatch(userName);
+      await tryMatch(partner);
+    } catch (err) {
+      console.error("skip_partner error:", err);
     }
   });
 
-  socket.on("leave_chat", () => {
-    const userName = socket.data.userName || nameBySocketId.get(socket.id);
-    if (!userName) return;
-    endMatchFor(userName, "تم إنهاء المحادثة");
-  });
-
-  socket.on("message", (msg) => {
-    const sender = socket.data.userName || nameBySocketId.get(socket.id);
-    const partner = activeMatches.get(sender);
-
-    if (!sender || !partner) return;
-    if (!msg) return;
-
-    const partnerSocket = getUserSocket(partner);
-    if (partnerSocket) {
-      partnerSocket.emit("message", String(msg));
-    }
-
-    console.log(`💬 message: ${sender} -> ${partner}: ${msg}`);
-  });
-
-  socket.on("image", (imgBase64) => {
-    const sender = socket.data.userName || nameBySocketId.get(socket.id);
-    const partner = activeMatches.get(sender);
-
-    if (!sender || !partner) return;
-    if (!imgBase64) return;
-
-    const partnerSocket = getUserSocket(partner);
-    if (partnerSocket) {
-      partnerSocket.emit("image", imgBase64);
-    }
-
-    console.log(`🖼️ image: ${sender} -> ${partner}`);
-  });
-
-  socket.on("typing", () => {
-    const sender = socket.data.userName || nameBySocketId.get(socket.id);
-    const partner = activeMatches.get(sender);
-
-    if (!sender || !partner) return;
-
-    const partnerSocket = getUserSocket(partner);
-    if (partnerSocket) {
-      partnerSocket.emit("typing");
+  socket.on("leave_chat", async () => {
+    try {
+      const userName = socket.data.userName || socketToUser.get(socket.id);
+      if (!userName) return;
+      await endMatch(userName, "تم إنهاء المحادثة");
+    } catch (err) {
+      console.error("leave_chat error:", err);
     }
   });
 
-  socket.on("stop_typing", () => {
-    const sender = socket.data.userName || nameBySocketId.get(socket.id);
-    const partner = activeMatches.get(sender);
+  socket.on("message", async (msg) => {
+    try {
+      const sender = socket.data.userName || socketToUser.get(socket.id);
+      const partner = activeMatches.get(sender);
 
-    if (!sender || !partner) return;
+      if (!sender || !partner || !msg) return;
 
-    const partnerSocket = getUserSocket(partner);
-    if (partnerSocket) {
-      partnerSocket.emit("stop_typing");
+      await emitToUser(partner, "message", String(msg));
+    } catch (err) {
+      console.error("message error:", err);
     }
   });
 
-  socket.on("private_message", (data) => {
+  socket.on("image", async (imgBase64) => {
+    try {
+      const sender = socket.data.userName || socketToUser.get(socket.id);
+      const partner = activeMatches.get(sender);
+
+      if (!sender || !partner || !imgBase64) return;
+
+      await emitToUser(partner, "image", imgBase64);
+    } catch (err) {
+      console.error("image error:", err);
+    }
+  });
+
+  socket.on("typing", async () => {
+    try {
+      const sender = socket.data.userName || socketToUser.get(socket.id);
+      const partner = activeMatches.get(sender);
+      if (!sender || !partner) return;
+
+      await emitToUser(partner, "typing");
+    } catch (err) {
+      console.error("typing error:", err);
+    }
+  });
+
+  socket.on("stop_typing", async () => {
+    try {
+      const sender = socket.data.userName || socketToUser.get(socket.id);
+      const partner = activeMatches.get(sender);
+      if (!sender || !partner) return;
+
+      await emitToUser(partner, "stop_typing");
+    } catch (err) {
+      console.error("stop_typing error:", err);
+    }
+  });
+
+  socket.on("private_message", async (data) => {
     try {
       const from = normalizeName(data?.from || socket.data.userName);
       const to = normalizeName(data?.to);
       const text = String(data?.text || "").trim();
-      const time = data?.time || nowIso();
+      const time = data?.time || new Date().toISOString();
 
       if (!from || !to || !text) {
-        console.log("⚠️ private_message invalid payload:", data);
+        console.log("⚠️ Invalid private_message payload:", data);
         return;
       }
 
-      const payload = { from, to, text, time };
+      const payload = {
+        from,
+        to,
+        text,
+        time: new Date(time).toISOString(),
+      };
 
-      console.log("Incoming event: private_message", payload);
+      await savePrivateMessage(payload);
+      await emitToUser(to, "private_message_received", payload);
 
-      savePrivateMessage(from, to, text, time);
-
-      const targetSocket = getUserSocket(to);
-      if (targetSocket) {
-        targetSocket.emit("private_message_received", payload);
-        console.log(`private_message forwarded to ${targetSocket.id}`);
-      } else {
-        console.log(`⚠️ target offline: ${to}`);
-      }
+      console.log(`✅ private_message saved and forwarded: ${from} -> ${to}`);
     } catch (err) {
       console.error("private_message error:", err);
     }
   });
 
-  socket.on("get_private_history", (data) => {
-    const from = normalizeName(data?.from || socket.data.userName);
-    const to = normalizeName(data?.to);
+  socket.on("get_private_history", async (data) => {
+    try {
+      const from = normalizeName(data?.from || socket.data.userName);
+      const to = normalizeName(data?.to);
 
-    if (!from || !to) {
+      if (!from || !to) {
+        socket.emit("private_history", []);
+        return;
+      }
+
+      const rows = await PrivateMessage.find({
+        conversationKey: conversationKey(from, to),
+      })
+        .sort({ time: 1, _id: 1 })
+        .lean();
+
+      const history = rows.map((m) => ({
+        from: m.from,
+        to: m.to,
+        text: m.text,
+        time:
+          m.time instanceof Date
+            ? m.time.toISOString()
+            : new Date(m.time).toISOString(),
+      }));
+
+      socket.emit("private_history", history);
+    } catch (err) {
+      console.error("get_private_history error:", err);
       socket.emit("private_history", []);
-      return;
     }
-
-    const key = conversationKey(from, to);
-    const history = privateHistories.get(key) || [];
-    socket.emit("private_history", history);
-
-    console.log(`📜 private_history sent for ${from} <-> ${to}`);
   });
 
-  socket.on("mark_messages_read", (data) => {
-    const user = normalizeName(data?.user || socket.data.userName);
-    const friend = normalizeName(data?.friend || data?.friendId);
+  socket.on("mark_messages_read", async (data) => {
+    try {
+      const user = normalizeName(data?.user || socket.data.userName);
+      const friend = normalizeName(data?.friend || data?.friendId);
 
-    console.log(`✅ mark_messages_read: user=${user}, friend=${friend}`);
+      if (!user || !friend) return;
+
+      await PrivateMessage.updateMany(
+        {
+          conversationKey: conversationKey(user, friend),
+          to: user,
+          readBy: { $ne: user },
+        },
+        {
+          $addToSet: { readBy: user },
+        }
+      );
+    } catch (err) {
+      console.error("mark_messages_read error:", err);
+    }
   });
 
-  socket.on("send_friend_request", (data) => {
-    const from = normalizeName(data?.from || socket.data.userName);
-    const to = normalizeName(data?.to);
+  socket.on("send_friend_request", async (data) => {
+    try {
+      const from = normalizeName(data?.from || socket.data.userName);
+      const to = normalizeName(data?.to);
 
-    if (!from || !to || from === to) return;
+      if (!from || !to || from === to) return;
 
-    const myFriends = ensureFriendSet(from);
-    if (myFriends.has(to)) {
-      socket.emit("friend_request_response", {
-        accepted: true,
-        message: "هذا المستخدم موجود بالفعل في قائمة أصدقائك",
-      });
-      return;
-    }
-
-    if (!friendRequests.has(to)) {
-      friendRequests.set(to, []);
-    }
-
-    const requests = friendRequests.get(to);
-    const alreadySent = requests.some((r) => r.from === from);
-    if (!alreadySent) {
-      requests.push({ from, time: nowIso() });
-    }
-
-    socket.emit("friend_request_sent", {
-      message: "تم إرسال طلب الصداقة",
-    });
-
-    const targetSocket = getUserSocket(to);
-    if (targetSocket) {
-      targetSocket.emit("friend_request_received", {
-        from,
-      });
-    }
-
-    console.log(`🤝 friend request: ${from} -> ${to}`);
-  });
-
-  socket.on("respond_friend_request", (data) => {
-    const responder = socket.data.userName || nameBySocketId.get(socket.id);
-    const from = normalizeName(data?.from);
-    const accepted = data?.accepted === true;
-
-    if (!responder || !from) return;
-
-    const requests = friendRequests.get(responder) || [];
-    friendRequests.set(
-      responder,
-      requests.filter((r) => r.from !== from)
-    );
-
-    const requesterSocket = getUserSocket(from);
-
-    if (accepted) {
-      ensureFriendSet(responder).add(from);
-      ensureFriendSet(from).add(responder);
-
-      socket.emit("friend_added_successfully", from);
-      if (requesterSocket) {
-        requesterSocket.emit("friend_added_successfully", responder);
-        requesterSocket.emit("friend_request_response", {
+      const alreadyFriends = await areFriends(from, to);
+      if (alreadyFriends) {
+        socket.emit("friend_request_response", {
           accepted: true,
-          message: `وافق ${responder} على طلب الصداقة`,
+          message: "هذا المستخدم موجود بالفعل في قائمة أصدقائك",
+        });
+        return;
+      }
+
+      const existingPending = await FriendRequest.findOne({
+        from,
+        to,
+        status: "pending",
+      }).lean();
+
+      if (!existingPending) {
+        await FriendRequest.create({
+          from,
+          to,
+          status: "pending",
         });
       }
 
-      console.log(`✅ friendship created: ${from} <-> ${responder}`);
-    } else {
-      if (requesterSocket) {
-        requesterSocket.emit("friend_request_response", {
+      socket.emit("friend_request_sent", {
+        message: "تم إرسال طلب الصداقة",
+      });
+
+      await emitToUser(to, "friend_request_received", { from });
+    } catch (err) {
+      console.error("send_friend_request error:", err);
+    }
+  });
+
+  socket.on("respond_friend_request", async (data) => {
+    try {
+      const responder = socket.data.userName || socketToUser.get(socket.id);
+      const from = normalizeName(data?.from);
+      const accepted = data?.accepted === true;
+
+      if (!responder || !from) return;
+
+      const requestDoc = await FriendRequest.findOne({
+        from,
+        to: responder,
+        status: "pending",
+      });
+
+      if (!requestDoc) {
+        socket.emit("friend_request_response", {
+          accepted: false,
+          message: "طلب الصداقة غير موجود",
+        });
+        return;
+      }
+
+      if (accepted) {
+        requestDoc.status = "accepted";
+        await requestDoc.save();
+
+        await createFriendship(from, responder);
+
+        socket.emit("friend_added_successfully", from);
+
+        await emitToUser(from, "friend_added_successfully", responder);
+        await emitToUser(from, "friend_request_response", {
+          accepted: true,
+          message: `وافق ${responder} على طلب الصداقة`,
+        });
+      } else {
+        requestDoc.status = "rejected";
+        await requestDoc.save();
+
+        await emitToUser(from, "friend_request_response", {
           accepted: false,
           message: `رفض ${responder} طلب الصداقة`,
         });
       }
-
-      console.log(`❌ friend request rejected: ${from} -> ${responder}`);
+    } catch (err) {
+      console.error("respond_friend_request error:", err);
     }
   });
 
-  socket.on("delete_friend", (data) => {
-    const me = socket.data.userName || nameBySocketId.get(socket.id);
-    const friend = normalizeName(data?.friend);
+  socket.on("get_my_friends", async () => {
+    try {
+      const me = socket.data.userName || socketToUser.get(socket.id);
+      if (!me) {
+        socket.emit("my_friends", []);
+        return;
+      }
 
-    if (!me || !friend) return;
+      const friends = await getFriendsList(me);
+      socket.emit("my_friends", friends);
+    } catch (err) {
+      console.error("get_my_friends error:", err);
+      socket.emit("my_friends", []);
+    }
+  });
 
-    ensureFriendSet(me).delete(friend);
-    ensureFriendSet(friend).delete(me);
+  socket.on("get_friends_status", async (friends) => {
+    try {
+      const requester = socket.data.userName || socketToUser.get(socket.id);
+      if (!requester || !Array.isArray(friends)) return;
 
-    socket.emit("friend_deleted_successfully", {
-      message: `تم حذف ${friend} من قائمة الأصدقاء`,
-    });
+      await sendFriendsStatus(requester, friends);
+    } catch (err) {
+      console.error("get_friends_status error:", err);
+    }
+  });
 
-    const friendSocket = getUserSocket(friend);
-    if (friendSocket) {
-      friendSocket.emit("friend_deleted_me", {
+  socket.on("delete_friend", async (data) => {
+    try {
+      const me = socket.data.userName || socketToUser.get(socket.id);
+      const friend = normalizeName(data?.friend);
+
+      if (!me || !friend) return;
+
+      await deleteFriendship(me, friend);
+
+      socket.emit("friend_deleted_successfully", {
+        message: `تم حذف ${friend} من قائمة الأصدقاء`,
+      });
+
+      await emitToUser(friend, "friend_deleted_me", {
         from: me,
         message: `قام ${me} بحذفك من قائمة الأصدقاء`,
       });
+    } catch (err) {
+      console.error("delete_friend error:", err);
     }
-
-    console.log(`🗑️ friendship removed: ${me} x ${friend}`);
   });
 
-  socket.on("get_friends_status", (friends) => {
-    const requester = socket.data.userName || nameBySocketId.get(socket.id);
-    if (!requester || !Array.isArray(friends)) return;
+  socket.on("disconnect", async () => {
+    try {
+      const userName = socket.data.userName || socketToUser.get(socket.id);
 
-    sendFriendsStatus(requester, friends);
-  });
+      if (userName) {
+        await setUserOffline(userName);
+        removeFromQueue(userName);
 
-  socket.on("disconnect", () => {
-    const userName = socket.data.userName || nameBySocketId.get(socket.id);
-
-    console.log("🔴 Disconnected socket:", socket.id, "user:", userName);
-
-    if (userName) {
-      usersByName.set(userName, {
-        socketId: null,
-        online: false,
-        lastSeen: nowIso(),
-      });
-
-      removeFromWaitingQueue(userName);
-
-      const partner = activeMatches.get(userName);
-      if (partner) {
-        activeMatches.delete(userName);
-        activeMatches.delete(partner);
-        emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
+        const partner = activeMatches.get(userName);
+        if (partner) {
+          activeMatches.delete(userName);
+          activeMatches.delete(partner);
+          await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
+        }
       }
-    }
 
-    nameBySocketId.delete(socket.id);
+      socketToUser.delete(socket.id);
+      console.log("🔴 Socket disconnected:", socket.id, "user:", userName);
+    } catch (err) {
+      console.error("disconnect error:", err);
+    }
   });
 });
 
-const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
