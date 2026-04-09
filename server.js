@@ -221,7 +221,14 @@ async function getUserSocket(userName) {
 
 async function emitToUser(userName, event, payload) {
   const socket = await getUserSocket(userName);
-  if (socket) socket.emit(event, payload);
+
+  if (!socket) {
+    console.log(`⚠️ emit failed -> ${userName}, event=${event}`);
+    return;
+  }
+
+  console.log(`📤 emit ${event} -> ${userName} (${socket.id})`);
+  socket.emit(event, payload);
 }
 
 async function emitSystemMessage(userName, message) {
@@ -239,7 +246,7 @@ async function setUserOnline(userName, socketId) {
         lastSeen: new Date(),
       },
     },
-    { upsert: true, new: true }
+    { upsert: true, new: true, returnDocument: "after" }
   );
 }
 
@@ -252,7 +259,8 @@ async function setUserOffline(userName) {
         online: false,
         lastSeen: new Date(),
       },
-    }
+    },
+    { returnDocument: "after" }
   );
 }
 
@@ -314,11 +322,22 @@ async function sendFriendsStatus(requester, friends) {
 }
 
 async function startMatch(userA, userB) {
+  userA = normalizeName(userA);
+  userB = normalizeName(userB);
+
+  if (!userA || !userB || userA === userB) return;
+  if (activeMatches.has(userA) || activeMatches.has(userB)) {
+    console.log(`⚠️ match skipped, already matched: ${userA}, ${userB}`);
+    return;
+  }
+
   removeFromQueue(userA);
   removeFromQueue(userB);
 
   activeMatches.set(userA, userB);
   activeMatches.set(userB, userA);
+
+  console.log(`✅ Match started: ${userA} <-> ${userB}`);
 
   await emitSystemMessage(userA, `تم العثور على صديق: ${userB}`);
   await emitSystemMessage(userB, `تم العثور على صديق: ${userA}`);
@@ -333,7 +352,7 @@ async function startMatch(userA, userB) {
     partnerName: userA,
   });
 
-  console.log(`✅ Match started: ${userA} <-> ${userB}`);
+  console.log(`📨 chat_started sent to both: ${userA}, ${userB}`);
 }
 
 async function endMatch(userName, reason = "تم إنهاء المحادثة") {
@@ -348,6 +367,7 @@ async function endMatch(userName, reason = "تم إنهاء المحادثة") {
 }
 
 async function tryMatch(userName) {
+  userName = normalizeName(userName);
   if (!userName) return;
 
   if (activeMatches.has(userName)) {
@@ -356,13 +376,18 @@ async function tryMatch(userName) {
   }
 
   removeFromQueue(userName);
-  const partner = waitingQueue.find((u) => u !== userName);
+
+  const partner = waitingQueue.find((u) => {
+    const other = normalizeName(u);
+    return other && other !== userName && !activeMatches.has(other);
+  });
 
   if (partner) {
     await startMatch(userName, partner);
   } else {
     waitingQueue.push(userName);
     await emitSystemMessage(userName, "جاري البحث عن شريك...");
+    console.log(`🔍 Added to queue: ${userName}`);
   }
 }
 
@@ -430,13 +455,6 @@ app.get("/health", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("🟢 Socket connected:", socket.id);
 
-  socket.onAny((eventName) => {
-    if (!isDbReady()) {
-      console.log(`⚠️ DB not ready, skipped event: ${eventName}`);
-      socket.emit("system_msg", "السيرفر غير جاهز حالياً، حاول بعد لحظات");
-    }
-  });
-
   socket.on("register_user", async (rawUserName) => {
     try {
       if (!isDbReady()) return;
@@ -461,6 +479,12 @@ io.on("connection", (socket) => {
 
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
+
+      if (activeMatches.has(userName)) {
+        await emitSystemMessage(userName, "أنت بالفعل في محادثة");
+        return;
+      }
+
       await tryMatch(userName);
     } catch (err) {
       console.error("find_partner error:", err);
@@ -500,6 +524,7 @@ io.on("connection", (socket) => {
 
       const userName = socket.data.userName || socketToUser.get(socket.id);
       if (!userName) return;
+
       await endMatch(userName, "تم إنهاء المحادثة");
     } catch (err) {
       console.error("leave_chat error:", err);
