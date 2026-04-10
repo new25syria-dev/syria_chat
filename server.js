@@ -262,6 +262,53 @@ async function getFullUserProfile(userName) {
   }
 }
 
+async function getUserStatusSummary(userName) {
+  try {
+    const cleanName = normalizeName(userName);
+    const user = await User.findOne({ userName: cleanName })
+      .select("userName online lastSeen")
+      .lean();
+
+    if (!user) {
+      return {
+        user: cleanName,
+        online: false,
+        lastSeen: null
+      };
+    }
+
+    return {
+      user: user.userName,
+      online: user.online === true,
+      lastSeen: user.lastSeen || null
+    };
+  } catch (err) {
+    logInfo("DB", `Error fetching status summary for ${userName}`, err);
+    return {
+      user: normalizeName(userName),
+      online: false,
+      lastSeen: null
+    };
+  }
+}
+
+function extractTargetName(rawValue) {
+  if (!rawValue) return "";
+  if (typeof rawValue === "string") {
+    return normalizeName(rawValue);
+  }
+  if (typeof rawValue === "object") {
+    return normalizeName(
+      rawValue.to ||
+      rawValue.userName ||
+      rawValue.target ||
+      rawValue.friend ||
+      rawValue.name
+    );
+  }
+  return normalizeName(rawValue);
+}
+
 function acquireMatchLock(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
@@ -376,6 +423,14 @@ async function tryMatch(userName) {
         continue;
       }
 
+      const alreadyFriends = await Friendship.findOne({
+        pairKey: pairKey(me, candidate)
+      }).lean();
+
+      if (alreadyFriends) {
+        continue;
+      }
+
       const partnerSocket = await getUserSocket(candidate);
       if (partnerSocket && !activeMatches.has(candidate) && !pendingMatchByUser.has(candidate)) {
         partner = candidate;
@@ -449,7 +504,7 @@ io.on("connection", (socket) => {
             online: true, 
             lastSeen: new Date() 
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       );
       
       logInfo("User", `Registered & Online: ${userName}`);
@@ -475,7 +530,7 @@ io.on("connection", (socket) => {
           bio: data?.bio ?? "",
           gender: data?.gender ?? "unspecified"
         },
-        { new: true }
+        { returnDocument: "after" }
       );
       
       socket.emit("profile_updated", { 
@@ -643,7 +698,7 @@ io.on("connection", (socket) => {
   // نظام الأصدقاء
   socket.on("send_friend_request", async (targetName) => {
     const me = socket.data.userName;
-    const to = normalizeName(targetName);
+    const to = extractTargetName(targetName);
     if (!me || !to || me === to) return;
 
     try {
@@ -710,6 +765,8 @@ io.on("connection", (socket) => {
         }
 
         await emitToUser(from, "friend_request_accepted", { by: me });
+        await emitToUser(me, "friend_added_successfully", from);
+        await emitToUser(from, "friend_added_successfully", me);
         logInfo("Social", `${me} and ${from} are now friends.`);
       } else {
         request.status = "rejected";
@@ -719,6 +776,58 @@ io.on("connection", (socket) => {
     } catch (err) {
       logInfo("Error", "Friend response failed", err);
       socket.emit("error_msg", { message: "Failed to respond to friend request" });
+    }
+  });
+
+  socket.on("get_friends_status", async (friends) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const list = Array.isArray(friends) ? friends : [];
+      for (const item of list) {
+        const friendName = normalizeName(item);
+        if (!friendName) continue;
+
+        const status = await getUserStatusSummary(friendName);
+        socket.emit("update_status", status);
+      }
+    } catch (err) {
+      logInfo("Error", "Failed to get friends status", err);
+      socket.emit("error_msg", { message: "Failed to get friends status" });
+    }
+  });
+
+  socket.on("delete_friend", async (payload) => {
+    try {
+      const me = socket.data.userName;
+      const friendName = extractTargetName(payload);
+      if (!me || !friendName || me === friendName) return;
+
+      const existingFriendship = await Friendship.findOne({
+        pairKey: pairKey(me, friendName)
+      });
+
+      if (!existingFriendship) {
+        return socket.emit("error_msg", { message: "Friendship not found" });
+      }
+
+      await Friendship.deleteOne({ pairKey: pairKey(me, friendName) });
+
+      await emitToUser(friendName, "friend_deleted_me", {
+        from: me,
+        message: `${me} removed you from friends`
+      });
+
+      socket.emit("friend_deleted_successfully", {
+        friend: friendName,
+        message: `Removed ${friendName} from friends`
+      });
+
+      logInfo("Social", `${me} removed ${friendName} from friends.`);
+    } catch (err) {
+      logInfo("Error", "Delete friend failed", err);
+      socket.emit("error_msg", { message: "Failed to delete friend" });
     }
   });
 
