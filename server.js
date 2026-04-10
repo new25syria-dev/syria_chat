@@ -33,7 +33,7 @@ const io = new Server(server, {
   },
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
 
 if (!DATABASE_URL) {
