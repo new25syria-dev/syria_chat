@@ -69,13 +69,13 @@ mongoose.set("bufferCommands", false);
 
 const userSchema = new mongoose.Schema(
   {
-    userName: { 
-        type: String, 
-        required: true, 
-        unique: true, 
-        trim: true, 
-        index: true,
-        lowercase: true 
+    userName: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      index: true,
+      lowercase: true
     },
     socketId: { type: String, default: null },
     online: { type: Boolean, default: false },
@@ -106,11 +106,11 @@ const friendRequestSchema = new mongoose.Schema(
   {
     from: { type: String, required: true, trim: true, index: true },
     to: { type: String, required: true, trim: true, index: true },
-    status: { 
-        type: String, 
-        enum: ["pending", "accepted", "rejected"], 
-        default: "pending", 
-        index: true 
+    status: {
+      type: String,
+      enum: ["pending", "accepted", "rejected"],
+      default: "pending",
+      index: true
     },
     sentAt: { type: Date, default: Date.now }
   },
@@ -419,9 +419,9 @@ async function tryMatch(userName) {
       if (!waitingQueue.includes(me)) {
         waitingQueue.push(me);
       }
-      await emitToUser(me, "waiting_in_queue", { 
-          status: "searching", 
-          message: "Searching for a partner..." 
+      await emitToUser(me, "waiting_in_queue", {
+        status: "searching",
+        message: "Searching for a partner..."
       });
       logInfo("Matchmaking", `User ${me} added to queue. Queue size: ${waitingQueue.length}`);
     }
@@ -460,14 +460,14 @@ io.on("connection", (socket) => {
 
       await User.findOneAndUpdate(
         { userName },
-        { 
-            socketId: socket.id, 
-            online: true, 
-            lastSeen: new Date() 
+        {
+          socketId: socket.id,
+          online: true,
+          lastSeen: new Date()
         },
         { upsert: true, returnDocument: "after" }
       );
-      
+
       logInfo("User", `Registered & Online: ${userName}`);
       socket.emit("registration_success", { userName, timestamp: new Date() });
     } catch (err) {
@@ -480,10 +480,10 @@ io.on("connection", (socket) => {
     try {
       const me = socket.data.userName;
       if (!me) return;
-      
+
       const updatedUser = await User.findOneAndUpdate(
         { userName: me },
-        { 
+        {
           profileImage: data?.profileImage ?? "",
           country: data?.country ?? "",
           age: data?.age ?? null,
@@ -492,10 +492,10 @@ io.on("connection", (socket) => {
         },
         { returnDocument: "after" }
       );
-      
-      socket.emit("profile_updated", { 
-          success: true, 
-          user: updatedUser 
+
+      socket.emit("profile_updated", {
+        success: true,
+        user: updatedUser
       });
       logInfo("User", `Profile updated for: ${me}`);
     } catch (err) {
@@ -606,13 +606,13 @@ io.on("connection", (socket) => {
       }
 
       const partner = activeMatches.get(me);
-      
+
       if (partner) {
         activeMatches.delete(me);
         activeMatches.delete(partner);
         await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
       }
-      
+
       tryMatch(me);
     } catch (err) {
       logInfo("Error", "skip_partner failed", err);
@@ -634,7 +634,7 @@ io.on("connection", (socket) => {
         time: new Date(),
         conversationKey: pairKey(me, partner)
       };
-      
+
       await RandomChatMessage.create(msgData);
       await emitToUser(partner, "message", msgData);
     } catch (err) {
@@ -703,22 +703,22 @@ io.on("connection", (socket) => {
         return socket.emit("error_msg", { message: "Already friends" });
       }
 
-      const existingReq = await FriendRequest.findOne({ 
-          from: me, 
-          to, 
-          status: "pending" 
+      const existingReq = await FriendRequest.findOne({
+        from: me,
+        to,
+        status: "pending"
       }).lean();
 
       const reverseReq = await FriendRequest.findOne({
-          from: to,
-          to: me,
-          status: "pending"
+        from: to,
+        to: me,
+        status: "pending"
       }).lean();
-      
+
       if (reverseReq) {
         return socket.emit("error_msg", { message: "There is already a pending request from this user" });
       }
-      
+
       if (!existingReq) {
         await FriendRequest.create({ from: me, to });
         await emitToUser(to, "new_friend_request", { from: me });
@@ -748,10 +748,10 @@ io.on("connection", (socket) => {
 
         const existingFriendship = await Friendship.findOne({ pairKey: pairKey(from, me) }).lean();
         if (!existingFriendship) {
-          await Friendship.create({ 
-              userA: from, 
-              userB: me, 
-              pairKey: pairKey(from, me) 
+          await Friendship.create({
+            userA: from,
+            userB: me,
+            pairKey: pairKey(from, me)
           });
         }
 
@@ -795,15 +795,39 @@ io.on("connection", (socket) => {
       const friendName = extractTargetName(payload);
       if (!me || !friendName || me === friendName) return;
 
+      const currentPairKey = pairKey(me, friendName);
+
       const existingFriendship = await Friendship.findOne({
-        pairKey: pairKey(me, friendName)
-      });
+        pairKey: currentPairKey
+      }).lean();
 
       if (!existingFriendship) {
-        return socket.emit("error_msg", { message: "Friendship not found" });
+        await FriendRequest.deleteMany({
+          $or: [
+            { from: me, to: friendName },
+            { from: friendName, to: me }
+          ]
+        });
+
+        await PrivateMessage.deleteMany({
+          conversationKey: currentPairKey
+        });
+
+        socket.emit("friend_deleted_successfully", {
+          friend: friendName,
+          message: `Removed ${friendName} from friends`
+        });
+
+        await emitToUser(friendName, "friend_deleted_me", {
+          from: me,
+          message: `${me} removed you from friends`
+        });
+
+        logInfo("Social", `${me} cleanup completed with ${friendName} even without active friendship record.`);
+        return;
       }
 
-      await Friendship.deleteOne({ pairKey: pairKey(me, friendName) });
+      await Friendship.deleteOne({ pairKey: currentPairKey });
 
       await FriendRequest.deleteMany({
         $or: [
@@ -812,9 +836,8 @@ io.on("connection", (socket) => {
         ]
       });
 
-      await emitToUser(friendName, "friend_deleted_me", {
-        from: me,
-        message: `${me} removed you from friends`
+      await PrivateMessage.deleteMany({
+        conversationKey: currentPairKey
       });
 
       socket.emit("friend_deleted_successfully", {
@@ -822,7 +845,12 @@ io.on("connection", (socket) => {
         message: `Removed ${friendName} from friends`
       });
 
-      logInfo("Social", `${me} removed ${friendName} from friends.`);
+      await emitToUser(friendName, "friend_deleted_me", {
+        from: me,
+        message: `${me} removed you from friends`
+      });
+
+      logInfo("Social", `${me} removed ${friendName} from friends and deleted all related data.`);
     } catch (err) {
       logInfo("Error", "Delete friend failed", err);
       socket.emit("error_msg", { message: "Failed to delete friend" });
@@ -922,7 +950,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
-    
+
     if (me) {
       const partner = activeMatches.get(me);
       if (partner) {
@@ -933,17 +961,17 @@ io.on("connection", (socket) => {
 
       const pKey = pendingMatchByUser.get(me);
       if (pKey) {
-          const prop = pendingMatches.get(pKey);
-          if (prop) {
-              if (prop.timeoutId) {
-                clearTimeout(prop.timeoutId);
-              }
-              const other = prop.userA === me ? prop.userB : prop.userA;
-              pendingMatches.delete(pKey);
-              pendingMatchByUser.delete(me);
-              pendingMatchByUser.delete(other);
-              await emitToUser(other, "match_cancelled", { reason: "partner_left" });
+        const prop = pendingMatches.get(pKey);
+        if (prop) {
+          if (prop.timeoutId) {
+            clearTimeout(prop.timeoutId);
           }
+          const other = prop.userA === me ? prop.userB : prop.userA;
+          pendingMatches.delete(pKey);
+          pendingMatchByUser.delete(me);
+          pendingMatchByUser.delete(other);
+          await emitToUser(other, "match_cancelled", { reason: "partner_left" });
+        }
       }
 
       removeFromQueue(me);
@@ -958,12 +986,12 @@ io.on("connection", (socket) => {
       for (const key of typingKeysToDelete) {
         userTypingTimeout.delete(key);
       }
-      
+
       const currentSocketId = userToSocket.get(me);
       if (currentSocketId === socket.id) {
         userToSocket.delete(me);
         await User.findOneAndUpdate(
-          { userName: me }, 
+          { userName: me },
           { online: false, lastSeen: new Date(), socketId: null }
         );
       }
@@ -977,7 +1005,7 @@ io.on("connection", (socket) => {
 // ==========================================
 
 app.get("/", (req, res) => {
-    res.send("Fadfad Master Server is running perfectly.");
+  res.send("Fadfad Master Server is running perfectly.");
 });
 
 app.get("/health", async (req, res) => {
@@ -986,15 +1014,15 @@ app.get("/health", async (req, res) => {
     status: "active",
     database: dbStatus === 1 ? "connected" : "error",
     metrics: {
-        onlineUsers: userToSocket.size,
-        queueSize: waitingQueue.length,
-        ongoingChats: activeMatches.size / 2,
-        pendingProposals: pendingMatches.size
+      onlineUsers: userToSocket.size,
+      queueSize: waitingQueue.length,
+      ongoingChats: activeMatches.size / 2,
+      pendingProposals: pendingMatches.size
     },
     system: {
-        uptime: process.uptime(),
-        memory: process.memoryUsage().heapUsed / 1024 / 1024 + " MB",
-        platform: process.platform
+      uptime: process.uptime(),
+      memory: process.memoryUsage().heapUsed / 1024 / 1024 + " MB",
+      platform: process.platform
     }
   });
 });
