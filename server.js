@@ -1,8 +1,21 @@
+// ==========================================
+// 1. استدعاء المكتبات وإعدادات البيئة
+// ==========================================
 const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
 
-const envCandidates = [".env", ".nenv", ".env.txt"];
+// مصفوفة مسارات ملفات الإعدادات لضمان المرونة القصوى
+const envCandidates = [
+  ".env",
+  ".nenv",
+  ".env.txt",
+  "config.env",
+  "vars.env",
+  ".env.production",
+  ".env.development"
+];
+
 const envPath = envCandidates
   .map((name) => path.join(__dirname, name))
   .find((candidate) => fs.existsSync(candidate));
@@ -25,1180 +38,833 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
+// إعدادات Socket.io المتقدمة لضمان استقرار الاتصال في Flutter
 const io = new Server(server, {
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectTimeout: 45000,
+  allowEIO3: true,
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
+    credentials: true
   },
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
 
 if (!DATABASE_URL) {
-  console.error("DATABASE_URL is missing in your environment file");
+  console.error("FATAL ERROR: DATABASE_URL is not defined in any environment file!");
   process.exit(1);
 }
 
+// إعدادات Mongoose لمنع التحذيرات وضمان استقرار قاعدة البيانات
 mongoose.set("strictQuery", true);
 mongoose.set("bufferCommands", false);
 
+// ==========================================
+// 2. تعريف مخططات قاعدة البيانات (Mongoose Schemas)
+// ==========================================
+
 const userSchema = new mongoose.Schema(
   {
-    userName: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      index: true,
+    userName: { 
+        type: String, 
+        required: true, 
+        unique: true, 
+        trim: true, 
+        index: true,
+        lowercase: true 
     },
-    socketId: {
-      type: String,
-      default: null,
-    },
-    online: {
-      type: Boolean,
-      default: false,
-    },
-    lastSeen: {
-      type: Date,
-      default: Date.now,
-    },
-    profileImage: {
-      type: String,
-      default: "",
-    },
-    country: {
-      type: String,
-      default: "",
-    },
-    age: {
-      type: Number,
-      default: null,
-    },
+    socketId: { type: String, default: null },
+    online: { type: Boolean, default: false },
+    lastSeen: { type: Date, default: Date.now },
+    profileImage: { type: String, default: "" },
+    country: { type: String, default: "" },
+    age: { type: Number, default: null },
+    bio: { type: String, default: "" },
+    gender: { type: String, default: "unspecified" },
+    fcmToken: { type: String, default: "" },
+    isBanned: { type: Boolean, default: false },
+    reports: { type: Number, default: 0 }
   },
   { timestamps: true }
 );
 
 const friendshipSchema = new mongoose.Schema(
   {
-    userA: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    userB: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    pairKey: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
+    userA: { type: String, required: true, trim: true, index: true },
+    userB: { type: String, required: true, trim: true, index: true },
+    pairKey: { type: String, required: true, unique: true, index: true },
+    friendsSince: { type: Date, default: Date.now }
   },
   { timestamps: true }
 );
 
 const friendRequestSchema = new mongoose.Schema(
   {
-    from: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
+    from: { type: String, required: true, trim: true, index: true },
+    to: { type: String, required: true, trim: true, index: true },
+    status: { 
+        type: String, 
+        enum: ["pending", "accepted", "rejected"], 
+        default: "pending", 
+        index: true 
     },
-    to: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    status: {
-      type: String,
-      enum: ["pending", "accepted", "rejected"],
-      default: "pending",
-      index: true,
-    },
+    sentAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
 );
-
 friendRequestSchema.index({ from: 1, to: 1, status: 1 });
 
 const privateMessageSchema = new mongoose.Schema(
   {
-    from: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    to: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    text: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    time: {
-      type: Date,
-      default: Date.now,
-      index: true,
-    },
-    conversationKey: {
-      type: String,
-      required: true,
-      index: true,
-    },
-    readBy: {
-      type: [String],
-      default: [],
-    },
+    from: { type: String, required: true, trim: true, index: true },
+    to: { type: String, required: true, trim: true, index: true },
+    text: { type: String, default: "", trim: true },
+    imageUrl: { type: String, default: "" },
+    time: { type: Date, default: Date.now, index: true },
+    conversationKey: { type: String, required: true, index: true },
+    readBy: { type: [String], default: [] },
+    isDeleted: { type: Boolean, default: false },
+    messageType: { type: String, default: "text" }
   },
   { timestamps: true }
 );
-
 privateMessageSchema.index({ conversationKey: 1, time: 1 });
 
 const randomChatMessageSchema = new mongoose.Schema(
   {
-    from: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    to: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    type: {
-      type: String,
-      enum: ["text", "image"],
-      required: true,
-      index: true,
-    },
-    text: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    image: {
-      type: String,
-      default: "",
-    },
-    time: {
-      type: Date,
-      default: Date.now,
-      index: true,
-    },
-    conversationKey: {
-      type: String,
-      required: true,
-      index: true,
-    },
+    from: { type: String, required: true, trim: true, index: true },
+    to: { type: String, required: true, trim: true, index: true },
+    type: { type: String, enum: ["text", "image", "voice", "system"], required: true, index: true },
+    text: { type: String, default: "", trim: true },
+    image: { type: String, default: "" },
+    time: { type: Date, default: Date.now, index: true },
+    conversationKey: { type: String, required: true, index: true },
   },
   { timestamps: true }
 );
-
-randomChatMessageSchema.index({ conversationKey: 1, time: 1 });
 
 const User = mongoose.model("User", userSchema);
 const Friendship = mongoose.model("Friendship", friendshipSchema);
 const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
-const RandomChatMessage = mongoose.model(
-  "RandomChatMessage",
-  randomChatMessageSchema
-);
+const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
 
+// ==========================================
+// 3. إدارة الحالة في الذاكرة (Memory State)
+// ==========================================
 const socketToUser = new Map();
 const waitingQueue = [];
 const activeMatches = new Map();
 const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
+const userTypingTimeout = new Map();
+
+// إضافات إصلاحية بدون حذف منطقك
+const userToSocket = new Map();
+const matchmakingLocks = new Set();
+const MATCH_PROPOSAL_TTL = 30000;
+
+// ==========================================
+// 4. الدوال المساعدة (Helper Functions)
+// ==========================================
 
 function logInfo(scope, message, extra = undefined) {
-  const prefix = `[${new Date().toISOString()}] [${scope}]`;
+  const prefix = `[${new Date().toISOString()}] [${scope.toUpperCase()}]`;
   if (extra === undefined) {
     console.log(`${prefix} ${message}`);
-    return;
+  } else {
+    console.log(`${prefix} ${message}`, JSON.stringify(extra, null, 2));
   }
-  console.log(`${prefix} ${message}`, extra);
 }
 
 function normalizeName(value) {
-  return String(value || "").trim();
+  if (!value) return "";
+  return String(value).trim().toLowerCase();
 }
 
 function pairKey(a, b) {
-  const x = normalizeName(a).toLowerCase();
-  const y = normalizeName(b).toLowerCase();
+  const x = normalizeName(a);
+  const y = normalizeName(b);
   return [x, y].sort().join("__");
 }
 
-function conversationKey(a, b) {
-  return pairKey(a, b);
-}
-
 function removeFromQueue(userName) {
-  const i = waitingQueue.indexOf(userName);
-  if (i !== -1) waitingQueue.splice(i, 1);
+  const cleanName = normalizeName(userName);
+  const index = waitingQueue.indexOf(cleanName);
+  if (index !== -1) {
+    waitingQueue.splice(index, 1);
+    logInfo("Queue", `User ${cleanName} removed from waiting list.`);
+  }
 }
 
-function isDbReady() {
+async function checkDatabaseConnection() {
   return mongoose.connection.readyState === 1;
 }
 
-function getPendingPartnerName(userName) {
-  const pendingKey = pendingMatchByUser.get(userName);
-  if (!pendingKey) return null;
-
-  const proposal = pendingMatches.get(pendingKey);
-  if (!proposal) return null;
-
-  return proposal.userA === userName ? proposal.userB : proposal.userA;
-}
-
-function clearPendingProposal(userA, userB) {
-  const key = pairKey(userA, userB);
-  pendingMatches.delete(key);
-  pendingMatchByUser.delete(userA);
-  pendingMatchByUser.delete(userB);
-}
-
 async function getUserSocket(userName) {
-  const user = await User.findOne({ userName: normalizeName(userName) }).lean();
-  if (!user || !user.socketId) return null;
-  return io.sockets.sockets.get(user.socketId) || null;
+  try {
+    const cleanName = normalizeName(userName);
+
+    // أولوية لذاكرة السيرفر السريعة
+    const directSocketId = userToSocket.get(cleanName);
+    if (directSocketId) {
+      const directSocket = io.sockets.sockets.get(directSocketId);
+      if (directSocket) return directSocket;
+      userToSocket.delete(cleanName);
+    }
+
+    const user = await User.findOne({ userName: cleanName }).select("socketId").lean();
+    if (!user || !user.socketId) return null;
+    const socket = io.sockets.sockets.get(user.socketId);
+    return socket || null;
+  } catch (err) {
+    logInfo("Critical", `Error in getUserSocket for ${userName}`, err);
+    return null;
+  }
 }
 
 async function emitToUser(userName, event, payload) {
-  const socket = await getUserSocket(userName);
-  if (!socket) return;
-  socket.emit(event, payload);
+  try {
+    const socket = await getUserSocket(userName);
+    if (socket) {
+      socket.emit(event, payload);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    logInfo("Socket", `Failed to emit ${event} to ${userName}`, err);
+    return false;
+  }
 }
 
-async function emitSystemMessage(userName, message) {
-  await emitToUser(userName, "system_msg", message);
+async function getFullUserProfile(userName) {
+  try {
+    const cleanName = normalizeName(userName);
+    const user = await User.findOne({ userName: cleanName }).lean();
+    if (!user) return null;
+    return {
+      userName: user.userName,
+      profileImage: user.profileImage,
+      country: user.country,
+      age: user.age,
+      bio: user.bio,
+      gender: user.gender,
+      lastSeen: user.lastSeen,
+      online: user.online
+    };
+  } catch (err) {
+    logInfo("DB", `Error fetching profile for ${userName}`, err);
+    return null;
+  }
 }
 
-async function isUserAvailableForMatch(userName) {
+function acquireMatchLock(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
-  if (activeMatches.has(cleanName) || pendingMatchByUser.has(cleanName)) {
-    return false;
-  }
-
-  const socket = await getUserSocket(cleanName);
-  if (!socket) {
-    removeFromQueue(cleanName);
-    return false;
-  }
-
+  if (matchmakingLocks.has(cleanName)) return false;
+  matchmakingLocks.add(cleanName);
   return true;
 }
 
-async function getPublicUserProfile(userName) {
+function releaseMatchLock(userName) {
   const cleanName = normalizeName(userName);
-  const user = await User.findOne({ userName: cleanName }).lean();
-
-  return {
-    userName: user?.userName || cleanName,
-    profileImage: user?.profileImage || "",
-    country: user?.country || "",
-    age: user?.age ?? null,
-  };
+  if (!cleanName) return;
+  matchmakingLocks.delete(cleanName);
 }
 
-async function setUserOnline(userName, socketId) {
-  await User.findOneAndUpdate(
-    { userName },
-    {
-      $set: {
-        userName,
-        socketId,
-        online: true,
-        lastSeen: new Date(),
-      },
-    },
-    { upsert: true, returnDocument: "after" }
-  );
-}
+async function cleanupPendingProposalByKey(key, reason = "cancelled", requeueOther = false, requeueMe = false) {
+  const proposal = pendingMatches.get(key);
+  if (!proposal) return null;
 
-async function setUserOffline(userName) {
-  await User.findOneAndUpdate(
-    { userName },
-    {
-      $set: {
-        socketId: null,
-        online: false,
-        lastSeen: new Date(),
-      },
-    },
-    { returnDocument: "after" }
-  );
-}
-
-async function syncUserProfile(userName, data = {}) {
-  const cleanName = normalizeName(userName);
-  const rawAge = data.age;
-  const parsedAge =
-    rawAge === null || rawAge === undefined || rawAge === ""
-      ? null
-      : Number(rawAge);
-
-  await User.findOneAndUpdate(
-    { userName: cleanName },
-    {
-      $set: {
-        userName: cleanName,
-        profileImage: String(data.profileImage || "").trim(),
-        country: String(data.country || "").trim(),
-        age: Number.isFinite(parsedAge) ? parsedAge : null,
-        lastSeen: new Date(),
-      },
-    },
-    { upsert: true, returnDocument: "after" }
-  );
-}
-
-async function areFriends(userA, userB) {
-  const key = pairKey(userA, userB);
-  const friendship = await Friendship.findOne({ pairKey: key }).lean();
-  return !!friendship;
-}
-
-async function createFriendship(userA, userB) {
-  const a = normalizeName(userA);
-  const b = normalizeName(userB);
-  const key = pairKey(a, b);
-
-  const existing = await Friendship.findOne({ pairKey: key }).lean();
-  if (existing) return existing;
-
-  return Friendship.create({
-    userA: a,
-    userB: b,
-    pairKey: key,
-  });
-}
-
-async function deleteFriendship(userA, userB) {
-  const key = pairKey(userA, userB);
-  await Friendship.deleteOne({ pairKey: key });
-}
-
-async function getFriendsList(userName) {
-  const rows = await Friendship.find({
-    $or: [{ userA: userName }, { userB: userName }],
-  }).lean();
-
-  return rows
-    .map((row) => (row.userA === userName ? row.userB : row.userA))
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b));
-}
-
-async function sendFriendsStatus(requester, friends) {
-  const requesterSocket = await getUserSocket(requester);
-  if (!requesterSocket) return;
-
-  for (const friend of friends) {
-    const cleanFriend = normalizeName(friend);
-    if (!cleanFriend) continue;
-
-    const user = await User.findOne({ userName: cleanFriend }).lean();
-
-    requesterSocket.emit("update_status", {
-      user: cleanFriend,
-      online: user?.online === true,
-      lastSeen: user?.lastSeen
-        ? new Date(user.lastSeen).toISOString()
-        : "غير معروف",
-    });
-  }
-}
-
-async function sendMatchFound(userName, partnerName) {
-  const partner = await getPublicUserProfile(partnerName);
-  logInfo("match_found", `${userName} <= ${partner.userName}`);
-  await emitSystemMessage(userName, `تم العثور على ${partner.userName}`);
-  await emitToUser(userName, "match_found", {
-    partner,
-  });
-}
-
-async function startMatchProposal(userA, userB) {
-  userA = normalizeName(userA);
-  userB = normalizeName(userB);
-
-  if (!userA || !userB || userA === userB) return;
-  if (
-    activeMatches.has(userA) ||
-    activeMatches.has(userB) ||
-    pendingMatchByUser.has(userA) ||
-    pendingMatchByUser.has(userB)
-  ) {
-    return;
+  if (proposal.timeoutId) {
+    clearTimeout(proposal.timeoutId);
   }
 
-  removeFromQueue(userA);
-  removeFromQueue(userB);
+  pendingMatches.delete(key);
+  pendingMatchByUser.delete(proposal.userA);
+  pendingMatchByUser.delete(proposal.userB);
 
+  const userA = proposal.userA;
+  const userB = proposal.userB;
+
+  await emitToUser(userA, "match_cancelled", { reason });
+  await emitToUser(userB, "match_cancelled", { reason });
+
+  if (requeueMe) {
+    tryMatch(userA);
+  }
+  if (requeueOther) {
+    tryMatch(userB);
+  }
+
+  return proposal;
+}
+
+function createPendingMatchEntry(userA, userB) {
   const key = pairKey(userA, userB);
+
+  const timeoutId = setTimeout(async () => {
+    try {
+      const proposal = pendingMatches.get(key);
+      if (!proposal) return;
+
+      pendingMatches.delete(key);
+      pendingMatchByUser.delete(proposal.userA);
+      pendingMatchByUser.delete(proposal.userB);
+
+      await emitToUser(proposal.userA, "match_timeout", { reason: "no_response" });
+      await emitToUser(proposal.userB, "match_timeout", { reason: "no_response" });
+
+      tryMatch(proposal.userA);
+      tryMatch(proposal.userB);
+
+      logInfo("Matchmaking", `Pending match expired between ${proposal.userA} and ${proposal.userB}`);
+    } catch (err) {
+      logInfo("Error", "Pending match timeout cleanup failed", err);
+    }
+  }, MATCH_PROPOSAL_TTL);
+
   pendingMatches.set(key, {
-    key,
     userA,
     userB,
     acceptedBy: new Set(),
+    createdAt: Date.now(),
+    timeoutId
   });
+
   pendingMatchByUser.set(userA, key);
   pendingMatchByUser.set(userB, key);
 
-  logInfo("match_proposal", `${userA} <-> ${userB}`, {
-    pendingMatches: pendingMatches.size,
-    queueLength: waitingQueue.length,
-  });
-
-  await sendMatchFound(userA, userB);
-  await sendMatchFound(userB, userA);
+  return key;
 }
 
-async function confirmActiveMatch(userA, userB) {
-  clearPendingProposal(userA, userB);
-
-  activeMatches.set(userA, userB);
-  activeMatches.set(userB, userA);
-
-  logInfo("match_confirmed", `${userA} <-> ${userB}`, {
-    activeMatches: activeMatches.size / 2,
-  });
-
-  await emitSystemMessage(userA, `تم بدء المحادثة مع ${userB}`);
-  await emitSystemMessage(userB, `تم بدء المحادثة مع ${userA}`);
-
-  await emitToUser(userA, "match_confirmed", {
-    partnerName: userB,
-  });
-  await emitToUser(userB, "match_confirmed", {
-    partnerName: userA,
-  });
-}
-
-async function closePendingMatchForUser(userName, reason, partnerReason) {
-  const pendingKey = pendingMatchByUser.get(userName);
-  if (!pendingKey) return null;
-
-  const proposal = pendingMatches.get(pendingKey);
-  if (!proposal) {
-    pendingMatchByUser.delete(userName);
-    return null;
-  }
-
-  const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
-
-  clearPendingProposal(proposal.userA, proposal.userB);
-  await emitSystemMessage(userName, reason);
-  await emitToUser(userName, "match_closed", { reason });
-  await emitSystemMessage(partner, partnerReason);
-  await emitToUser(partner, "match_closed", { reason: partnerReason });
-
-  return partner;
-}
-
-async function endMatch(userName, reason = "تم إنهاء المحادثة") {
-  const partner = activeMatches.get(userName);
-  if (!partner) return;
-
-  activeMatches.delete(userName);
-  activeMatches.delete(partner);
-
-  await emitSystemMessage(userName, reason);
-  await emitSystemMessage(partner, "غادر الطرف الآخر");
-}
+// ==========================================
+// 5. منطق المطابقة (Matchmaking System)
+// ==========================================
 
 async function tryMatch(userName) {
-  userName = normalizeName(userName);
-  if (!userName) return;
+  const me = normalizeName(userName);
+  if (!me) return;
 
-  if (activeMatches.has(userName)) {
-    await emitSystemMessage(userName, "أنت بالفعل في محادثة");
+  if (!acquireMatchLock(me)) {
+    logInfo("Matchmaking", `User ${me} matchmaking request ignored due to active lock.`);
     return;
   }
 
-  if (pendingMatchByUser.has(userName)) {
-    await emitSystemMessage(userName, "تم العثور على شريك بانتظار قرارك");
-    return;
-  }
-
-  removeFromQueue(userName);
-
-  let partner = null;
-  for (const candidate of [...waitingQueue]) {
-    const other = normalizeName(candidate);
-    if (!other || other === userName) continue;
-    if (await isUserAvailableForMatch(other)) {
-      partner = other;
-      break;
-    }
-    removeFromQueue(other);
-  }
-
-  if (partner) {
-    logInfo("match_try", `proposal candidate found for ${userName}: ${partner}`);
-    await startMatchProposal(userName, partner);
-  } else {
-    waitingQueue.push(userName);
-    logInfo("match_try", `${userName} added to queue`, {
-      queueLength: waitingQueue.length,
-    });
-    await emitSystemMessage(userName, "جاري البحث عن شريك...");
-  }
-}
-
-async function savePrivateMessage({ from, to, text, time }) {
-  const t = time ? new Date(time) : new Date();
-
-  return PrivateMessage.create({
-    from,
-    to,
-    text,
-    time: t,
-    conversationKey: conversationKey(from, to),
-    readBy: [from],
-  });
-}
-
-async function saveRandomChatMessage({ from, to, type, text = "", image = "" }) {
-  return RandomChatMessage.create({
-    from,
-    to,
-    type,
-    text,
-    image,
-    time: new Date(),
-    conversationKey: conversationKey(from, to),
-  });
-}
-
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "FadFad server running",
-    dbReady: isDbReady(),
-  });
-});
-
-app.get("/health", async (req, res) => {
   try {
-    if (!isDbReady()) {
-      return res.status(500).json({
-        ok: false,
-        dbReady: false,
-        error: "MongoDB not connected",
-      });
+    logInfo("Matchmaking", `User ${me} requested a new match.`);
+
+    // منع المستخدم إذا كان بالفعل في محادثة أو طلب معلق
+    if (activeMatches.has(me) || pendingMatchByUser.has(me)) {
+      logInfo("Matchmaking", `User ${me} is already busy, skipping request.`);
+      return;
     }
 
-    const users = await User.countDocuments();
-    const friendships = await Friendship.countDocuments();
-    const friendRequests = await FriendRequest.countDocuments();
-    const messages = await PrivateMessage.countDocuments();
-    const randomMessages = await RandomChatMessage.countDocuments();
+    removeFromQueue(me);
 
-    res.json({
-      ok: true,
-      dbReady: true,
-      users,
-      friendships,
-      friendRequests,
-      messages,
-      randomMessages,
-      waitingQueueLength: waitingQueue.length,
-      activeMatchesLength: activeMatches.size,
-      pendingMatchesLength: pendingMatches.size,
-    });
+    let partner = null;
+    // فحص طابور الانتظار
+    for (let i = 0; i < waitingQueue.length; i++) {
+      const candidate = waitingQueue[i];
+      if (candidate === me) continue;
+
+      if (matchmakingLocks.has(candidate)) {
+        continue;
+      }
+
+      const partnerSocket = await getUserSocket(candidate);
+      if (partnerSocket && !activeMatches.has(candidate) && !pendingMatchByUser.has(candidate)) {
+        partner = candidate;
+        waitingQueue.splice(i, 1);
+        break;
+      } else {
+        // تنظيف الطابور من المستخدمين غير المتصلين
+        waitingQueue.splice(i, 1);
+        i--;
+      }
+    }
+
+    if (partner) {
+      const key = createPendingMatchEntry(me, partner);
+
+      const myProfile = await getFullUserProfile(me);
+      const partnerProfile = await getFullUserProfile(partner);
+
+      await emitToUser(me, "match_found", { partner: partnerProfile, proposalKey: key });
+      await emitToUser(partner, "match_found", { partner: myProfile, proposalKey: key });
+      logInfo("Matchmaking", `Proposed match between ${me} and ${partner}`);
+    } else {
+      if (!waitingQueue.includes(me)) {
+        waitingQueue.push(me);
+      }
+      await emitToUser(me, "waiting_in_queue", { 
+          status: "searching", 
+          message: "Searching for a partner..." 
+      });
+      logInfo("Matchmaking", `User ${me} added to queue. Queue size: ${waitingQueue.length}`);
+    }
   } catch (err) {
-    res.status(500).json({
-      ok: false,
-      dbReady: isDbReady(),
-      error: err.message,
-    });
+    logInfo("Error", `Matchmaking failure for ${me}`, err);
+  } finally {
+    releaseMatchLock(me);
   }
-});
+}
+
+// ==========================================
+// 6. أحداث السوكيت (Socket.io Events)
+// ==========================================
 
 io.on("connection", (socket) => {
-  logInfo("socket", `connected ${socket.id}`);
-  socket.on("register_user", async (rawUserName) => {
-    try {
-      if (!isDbReady()) return;
+  logInfo("Network", `Socket connected: ${socket.id}`);
 
-      const userName = normalizeName(rawUserName);
+  // حدث التسجيل الأساسي
+  socket.on("register_user", async (rawName) => {
+    try {
+      const userName = normalizeName(rawName);
       if (!userName) return;
+
+      // إغلاق أي جلسة قديمة لنفس المستخدم
+      const existingUser = await User.findOne({ userName }).select("socketId").lean();
+      if (existingUser?.socketId && existingUser.socketId !== socket.id) {
+        const oldSocket = io.sockets.sockets.get(existingUser.socketId);
+        if (oldSocket) {
+          oldSocket.emit("session_replaced", { message: "Logged in from another device" });
+          oldSocket.disconnect(true);
+        }
+        socketToUser.delete(existingUser.socketId);
+      }
 
       socket.data.userName = userName;
       socketToUser.set(socket.id, userName);
-      await setUserOnline(userName, socket.id);
-      logInfo("register_user", `${userName} -> ${socket.id}`);
+      userToSocket.set(userName, socket.id);
+
+      await User.findOneAndUpdate(
+        { userName },
+        { 
+            socketId: socket.id, 
+            online: true, 
+            lastSeen: new Date() 
+        },
+        { upsert: true, new: true }
+      );
+      
+      logInfo("User", `Registered & Online: ${userName}`);
+      socket.emit("registration_success", { userName, timestamp: new Date() });
     } catch (err) {
-      console.error("register_user error:", err);
+      logInfo("Error", "Registration process failed", err);
+      socket.emit("error_msg", { message: "Registration process failed" });
     }
   });
 
-  socket.on("sync_profile", async (data) => {
+  // تحديث بيانات الملف الشخصي
+  socket.on("update_profile", async (data) => {
     try {
-      if (!isDbReady()) return;
-
-      const userName = normalizeName(data?.userName || socket.data.userName);
-      if (!userName) return;
-
-      socket.data.userName = userName;
-      socketToUser.set(socket.id, userName);
-      await syncUserProfile(userName, data);
+      const me = socket.data.userName;
+      if (!me) return;
+      
+      const updatedUser = await User.findOneAndUpdate(
+        { userName: me },
+        { 
+          profileImage: data?.profileImage ?? "",
+          country: data?.country ?? "",
+          age: data?.age ?? null,
+          bio: data?.bio ?? "",
+          gender: data?.gender ?? "unspecified"
+        },
+        { new: true }
+      );
+      
+      socket.emit("profile_updated", { 
+          success: true, 
+          user: updatedUser 
+      });
+      logInfo("User", `Profile updated for: ${me}`);
     } catch (err) {
-      console.error("sync_profile error:", err);
+      logInfo("Error", "Failed to update profile", err);
+      socket.emit("error_msg", { message: "Failed to update profile" });
     }
   });
 
-  socket.on("find_partner", async () => {
-    try {
-      if (!isDbReady()) return;
-
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-      if (!userName) return;
-
-      logInfo("find_partner", `${userName} requested match`);
-      await tryMatch(userName);
-    } catch (err) {
-      console.error("find_partner error:", err);
-    }
+  // أوامر الشات العشوائي
+  socket.on("find_partner", () => {
+    tryMatch(socket.data.userName);
   });
 
   socket.on("accept_match", async () => {
     try {
-      if (!isDbReady()) return;
+      const me = socket.data.userName;
+      if (!me) return;
 
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-      if (!userName) return;
+      const key = pendingMatchByUser.get(me);
+      if (!key) return;
 
-      const pendingKey = pendingMatchByUser.get(userName);
-      if (!pendingKey) return;
+      const proposal = pendingMatches.get(key);
+      if (!proposal) return;
 
-      const proposal = pendingMatches.get(pendingKey);
-      if (!proposal) {
-        pendingMatchByUser.delete(userName);
-        return;
+      proposal.acceptedBy.add(me);
+      const partner = proposal.userA === me ? proposal.userB : proposal.userA;
+
+      if (proposal.acceptedBy.size === 2) {
+        if (proposal.timeoutId) {
+          clearTimeout(proposal.timeoutId);
+        }
+
+        pendingMatches.delete(key);
+        pendingMatchByUser.delete(proposal.userA);
+        pendingMatchByUser.delete(proposal.userB);
+
+        activeMatches.set(proposal.userA, proposal.userB);
+        activeMatches.set(proposal.userB, proposal.userA);
+
+        await emitToUser(proposal.userA, "match_confirmed", { partnerName: proposal.userB });
+        await emitToUser(proposal.userB, "match_confirmed", { partnerName: proposal.userA });
+        logInfo("Matchmaking", `Chat started between ${proposal.userA} and ${proposal.userB}`);
+      } else {
+        await emitToUser(partner, "partner_accepted", { message: "Partner is ready" });
       }
-
-      proposal.acceptedBy.add(userName);
-      const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
-      logInfo("accept_match", `${userName} accepted`, {
-        partner,
-        acceptedBy: Array.from(proposal.acceptedBy),
-      });
-
-      if (proposal.acceptedBy.size < 2) {
-        await emitSystemMessage(
-          userName,
-          "تم إرسال طلب الدخول. ننتظر موافقة الطرف الآخر"
-        );
-        await emitToUser(userName, "match_waiting", { partnerName: partner });
-        await emitSystemMessage(
-          partner,
-          `${userName} جاهز للدخول إلى المحادثة`
-        );
-        await emitToUser(partner, "match_partner_ready", {
-          partnerName: userName,
-        });
-        return;
-      }
-
-      await confirmActiveMatch(proposal.userA, proposal.userB);
     } catch (err) {
-      console.error("accept_match error:", err);
-    }
-  });
-
-  socket.on("cancel_find", async () => {
-    try {
-      if (!isDbReady()) return;
-
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-      if (!userName) return;
-
-      logInfo("cancel_find", `${userName} cancelled search`);
-
-      const partner = await closePendingMatchForUser(
-        userName,
-        "تم إيقاف البحث",
-        "الطرف الآخر أوقف البحث"
-      );
-      if (partner) {
-        await tryMatch(partner);
-        return;
-      }
-
-      removeFromQueue(userName);
-      await emitSystemMessage(userName, "تم إيقاف البحث");
-    } catch (err) {
-      console.error("cancel_find error:", err);
+      logInfo("Error", "accept_match failed", err);
     }
   });
 
   socket.on("skip_partner", async () => {
     try {
-      if (!isDbReady()) return;
+      const me = socket.data.userName;
+      if (!me) return;
 
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-      if (!userName) return;
-      logInfo("skip_partner", `${userName} requested skip`);
-
-      const pendingKey = pendingMatchByUser.get(userName);
+      const pendingKey = pendingMatchByUser.get(me);
       if (pendingKey) {
         const proposal = pendingMatches.get(pendingKey);
-        if (!proposal) {
-          pendingMatchByUser.delete(userName);
-          return;
+        if (proposal) {
+          if (proposal.timeoutId) {
+            clearTimeout(proposal.timeoutId);
+          }
+
+          const other = proposal.userA === me ? proposal.userB : proposal.userA;
+          pendingMatches.delete(pendingKey);
+          pendingMatchByUser.delete(me);
+          pendingMatchByUser.delete(other);
+
+          await emitToUser(other, "match_cancelled", { reason: "partner_skipped" });
+          logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}`);
         }
 
-        const partner = proposal.userA === userName ? proposal.userB : proposal.userA;
-
-        clearPendingProposal(proposal.userA, proposal.userB);
-        await emitSystemMessage(
-          userName,
-          "تم التخطي. جاري البحث عن شريك جديد..."
-        );
-        await emitToUser(userName, "match_searching", {});
-        await emitSystemMessage(
-          partner,
-          "تم التخطي من الطرف الآخر"
-        );
-        await emitToUser(partner, "match_closed", {
-          reason: "تم التخطي من الطرف الآخر",
-        });
-
-        await tryMatch(userName);
-        await tryMatch(partner);
-        return;
+        return tryMatch(me);
       }
 
-      const activePartner = activeMatches.get(userName);
-      if (!activePartner) {
-        await emitSystemMessage(userName, "لا يوجد شريك لتخطيه");
-        return;
+      const partner = activeMatches.get(me);
+      
+      if (partner) {
+        activeMatches.delete(me);
+        activeMatches.delete(partner);
+        await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
       }
-
-      activeMatches.delete(userName);
-      activeMatches.delete(activePartner);
-
-      await emitSystemMessage(
-        userName,
-        "تم التخطي. جاري البحث عن شريك جديد..."
-      );
-      await emitToUser(userName, "match_searching", {});
-      await emitSystemMessage(activePartner, "تم التخطي من الطرف الآخر");
-      await emitToUser(activePartner, "match_searching", {});
-
-      await tryMatch(userName);
-      await tryMatch(activePartner);
+      
+      // محاولة مطابقة فورية بعد السكيب
+      tryMatch(me);
     } catch (err) {
-      console.error("skip_partner error:", err);
+      logInfo("Error", "skip_partner failed", err);
     }
   });
 
-  socket.on("leave_chat", async () => {
+  // مراسلات الشات العشوائي
+  socket.on("message", async (msgContent) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    const cleanText = String(msgContent || "").trim();
+    if (!partner || !cleanText) return;
+
     try {
-      if (!isDbReady()) return;
-
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-      if (!userName) return;
-
-      await endMatch(userName, "تم إنهاء المحادثة");
-    } catch (err) {
-      console.error("leave_chat error:", err);
-    }
-  });
-
-  socket.on("message", async (msg) => {
-    try {
-      if (!isDbReady()) return;
-
-      const sender = socket.data.userName || socketToUser.get(socket.id);
-      const partner = activeMatches.get(sender);
-
-      if (!sender || !partner || !msg) return;
-
-      await saveRandomChatMessage({
-        from: sender,
+      const msgData = {
+        from: me,
         to: partner,
         type: "text",
-        text: String(msg),
-      });
-      await emitToUser(partner, "message", String(msg));
+        text: cleanText,
+        time: new Date(),
+        conversationKey: pairKey(me, partner)
+      };
+      
+      await RandomChatMessage.create(msgData);
+      await emitToUser(partner, "message", msgData);
     } catch (err) {
-      console.error("message error:", err);
+      logInfo("Error", "Random chat message failed to send", err);
     }
   });
 
-  socket.on("image", async (imgBase64) => {
+  socket.on("send_image", async (imgData) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    if (!partner || !imgData?.url) return;
+
     try {
-      if (!isDbReady()) return;
-
-      const sender = socket.data.userName || socketToUser.get(socket.id);
-      const partner = activeMatches.get(sender);
-
-      if (!sender || !partner || !imgBase64) return;
-
-      await saveRandomChatMessage({
-        from: sender,
+      const data = {
+        from: me,
         to: partner,
         type: "image",
-        image: String(imgBase64),
-      });
-      await emitToUser(partner, "image", imgBase64);
+        image: imgData.url,
+        time: new Date(),
+        conversationKey: pairKey(me, partner)
+      };
+      await RandomChatMessage.create(data);
+      await emitToUser(partner, "image_received", data);
     } catch (err) {
-      console.error("image error:", err);
+      logInfo("Error", "Image transmission failed", err);
     }
   });
 
-  socket.on("typing", async () => {
-    try {
-      if (!isDbReady()) return;
+  socket.on("typing", (isTyping) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    if (!partner) return;
 
-      const sender = socket.data.userName || socketToUser.get(socket.id);
-      const partner = activeMatches.get(sender);
-      if (!sender || !partner) return;
+    const key = pairKey(me, partner);
+    const oldTimeout = userTypingTimeout.get(key);
+    if (oldTimeout) {
+      clearTimeout(oldTimeout);
+    }
 
-      await emitToUser(partner, "typing");
-    } catch (err) {
-      console.error("typing error:", err);
+    emitToUser(partner, "partner_typing", { isTyping: Boolean(isTyping) });
+
+    if (isTyping) {
+      const timeoutId = setTimeout(() => {
+        emitToUser(partner, "partner_typing", { isTyping: false });
+        userTypingTimeout.delete(key);
+      }, 2500);
+      userTypingTimeout.set(key, timeoutId);
+    } else {
+      userTypingTimeout.delete(key);
     }
   });
 
-  socket.on("stop_typing", async () => {
+  // نظام الأصدقاء
+  socket.on("send_friend_request", async (targetName) => {
+    const me = socket.data.userName;
+    const to = normalizeName(targetName);
+    if (!me || !to || me === to) return;
+
     try {
-      if (!isDbReady()) return;
+      const targetUser = await User.findOne({ userName: to }).select("_id userName").lean();
+      if (!targetUser) {
+        return socket.emit("error_msg", { message: "Target user does not exist" });
+      }
 
-      const sender = socket.data.userName || socketToUser.get(socket.id);
-      const partner = activeMatches.get(sender);
-      if (!sender || !partner) return;
+      const alreadyFriends = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      if (alreadyFriends) {
+        return socket.emit("error_msg", { message: "Already friends" });
+      }
 
-      await emitToUser(partner, "stop_typing");
+      const existingReq = await FriendRequest.findOne({ 
+          from: me, 
+          to, 
+          status: "pending" 
+      }).lean();
+
+      const reverseReq = await FriendRequest.findOne({
+          from: to,
+          to: me,
+          status: "pending"
+      }).lean();
+      
+      if (reverseReq) {
+        return socket.emit("error_msg", { message: "There is already a pending request from this user" });
+      }
+      
+      if (!existingReq) {
+        await FriendRequest.create({ from: me, to });
+        await emitToUser(to, "new_friend_request", { from: me });
+        socket.emit("request_sent", { success: true, to });
+        logInfo("Social", `Friend request from ${me} to ${to}`);
+      } else {
+        socket.emit("error_msg", { message: "Friend request already pending" });
+      }
     } catch (err) {
-      console.error("stop_typing error:", err);
+      logInfo("Error", "Friend request system failure", err);
+      socket.emit("error_msg", { message: "Friend request failed" });
+    }
+  });
+
+  socket.on("respond_to_request", async (data) => {
+    const me = socket.data.userName;
+    const from = normalizeName(data?.from);
+    const accept = Boolean(data?.accept);
+
+    try {
+      const request = await FriendRequest.findOne({ from, to: me, status: "pending" });
+      if (!request) return;
+
+      if (accept) {
+        request.status = "accepted";
+        await request.save();
+
+        const existingFriendship = await Friendship.findOne({ pairKey: pairKey(from, me) }).lean();
+        if (!existingFriendship) {
+          await Friendship.create({ 
+              userA: from, 
+              userB: me, 
+              pairKey: pairKey(from, me) 
+          });
+        }
+
+        await emitToUser(from, "friend_request_accepted", { by: me });
+        logInfo("Social", `${me} and ${from} are now friends.`);
+      } else {
+        request.status = "rejected";
+        await request.save();
+        await emitToUser(from, "friend_request_rejected", { by: me });
+      }
+    } catch (err) {
+      logInfo("Error", "Friend response failed", err);
+      socket.emit("error_msg", { message: "Failed to respond to friend request" });
     }
   });
 
   socket.on("private_message", async (data) => {
+    const me = socket.data.userName;
+    const to = normalizeName(data?.to);
+    const cleanText = String(data?.text || "").trim();
+    if (!me || !to || !cleanText) return;
+
     try {
-      if (!isDbReady()) return;
-
-      const from = normalizeName(data?.from || socket.data.userName);
-      const to = normalizeName(data?.to);
-      const text = String(data?.text || "").trim();
-      const time = data?.time || new Date().toISOString();
-
-      if (!from || !to || !text) return;
-
-      const payload = {
-        from,
-        to,
-        text,
-        time: new Date(time).toISOString(),
-      };
-
-      await savePrivateMessage(payload);
-      await emitToUser(to, "private_message_received", payload);
-      logInfo("private_message", `${from} -> ${to}`);
-    } catch (err) {
-      console.error("private_message error:", err);
-    }
-  });
-
-  socket.on("get_private_history", async (data) => {
-    try {
-      if (!isDbReady()) return;
-
-      const from = normalizeName(data?.from || socket.data.userName);
-      const to = normalizeName(data?.to);
-
-      if (!from || !to) {
-        socket.emit("private_history", []);
-        return;
+      // التأكد من وجود صداقة قبل إرسال رسالة خاصة
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) });
+      if (!isFriend) {
+          return socket.emit("error_msg", { message: "Not friends yet" });
       }
 
-      const rows = await PrivateMessage.find({
-        conversationKey: conversationKey(from, to),
-      })
-        .sort({ time: 1, _id: 1 })
-        .lean();
-
-      const history = rows.map((m) => ({
-        from: m.from,
-        to: m.to,
-        text: m.text,
-        time:
-          m.time instanceof Date
-            ? m.time.toISOString()
-            : new Date(m.time).toISOString(),
-      }));
-
-      socket.emit("private_history", history);
-    } catch (err) {
-      console.error("get_private_history error:", err);
-      socket.emit("private_history", []);
-    }
-  });
-
-  socket.on("mark_messages_read", async (data) => {
-    try {
-      if (!isDbReady()) return;
-
-      const user = normalizeName(data?.user || socket.data.userName);
-      const friend = normalizeName(data?.friend || data?.friendId);
-
-      if (!user || !friend) return;
-
-      await PrivateMessage.updateMany(
-        {
-          conversationKey: conversationKey(user, friend),
-          to: user,
-          readBy: { $ne: user },
-        },
-        {
-          $addToSet: { readBy: user },
-        }
-      );
-    } catch (err) {
-      console.error("mark_messages_read error:", err);
-    }
-  });
-
-  socket.on("send_friend_request", async (data) => {
-    try {
-      if (!isDbReady()) return;
-
-      const from = normalizeName(data?.from || socket.data.userName);
-      const to = normalizeName(
-        data?.to || activeMatches.get(from) || getPendingPartnerName(from)
-      );
-
-      if (!from || !to || from === to) return;
-
-      const alreadyFriends = await areFriends(from, to);
-      if (alreadyFriends) {
-        socket.emit("friend_request_response", {
-          accepted: true,
-          message: "هذا المستخدم موجود بالفعل في قائمة أصدقائك",
-        });
-        return;
-      }
-
-      const existingPending = await FriendRequest.findOne({
-        from,
-        to,
-        status: "pending",
-      }).lean();
-
-      if (!existingPending) {
-        await FriendRequest.create({
-          from,
-          to,
-          status: "pending",
-        });
-        logInfo("friend_request", `${from} -> ${to} created`);
-      } else {
-        logInfo("friend_request", `${from} -> ${to} reused pending`);
-      }
-
-      socket.emit("friend_request_sent", {
-        message: "تم إرسال طلب الصداقة",
-      });
-
-      await emitToUser(to, "friend_request_received", { from });
-    } catch (err) {
-      console.error("send_friend_request error:", err);
-    }
-  });
-
-  socket.on("respond_friend_request", async (data) => {
-    try {
-      if (!isDbReady()) return;
-
-      const responder = socket.data.userName || socketToUser.get(socket.id);
-      const from = normalizeName(data?.from);
-      const accepted = data?.accepted === true;
-
-      if (!responder || !from) return;
-
-      const requestDoc = await FriendRequest.findOne({
-        from,
-        to: responder,
-        status: "pending",
-      });
-
-      if (!requestDoc) {
-        socket.emit("friend_request_response", {
-          accepted: false,
-          message: "طلب الصداقة غير موجود",
-        });
-        return;
-      }
-
-      if (accepted) {
-        requestDoc.status = "accepted";
-        await requestDoc.save();
-
-        await createFriendship(from, responder);
-        logInfo("friend_request", `${responder} accepted ${from}`);
-
-        socket.emit("friend_added_successfully", from);
-
-        await emitToUser(from, "friend_added_successfully", responder);
-        await emitToUser(from, "friend_request_response", {
-          accepted: true,
-          message: `وافق ${responder} على طلب الصداقة`,
-        });
-      } else {
-        requestDoc.status = "rejected";
-        await requestDoc.save();
-        logInfo("friend_request", `${responder} rejected ${from}`);
-
-        await emitToUser(from, "friend_request_response", {
-          accepted: false,
-          message: `رفض ${responder} طلب الصداقة`,
-        });
-      }
-    } catch (err) {
-      console.error("respond_friend_request error:", err);
-    }
-  });
-
-  socket.on("get_my_friends", async () => {
-    try {
-      if (!isDbReady()) return;
-
-      const me = socket.data.userName || socketToUser.get(socket.id);
-      if (!me) {
-        socket.emit("my_friends", []);
-        return;
-      }
-
-      const friends = await getFriendsList(me);
-      socket.emit("my_friends", friends);
-    } catch (err) {
-      console.error("get_my_friends error:", err);
-      socket.emit("my_friends", []);
-    }
-  });
-
-  socket.on("get_friends_status", async (friends) => {
-    try {
-      if (!isDbReady()) return;
-
-      const requester = socket.data.userName || socketToUser.get(socket.id);
-      if (!requester || !Array.isArray(friends)) return;
-
-      await sendFriendsStatus(requester, friends);
-    } catch (err) {
-      console.error("get_friends_status error:", err);
-    }
-  });
-
-  socket.on("delete_friend", async (data) => {
-    try {
-      if (!isDbReady()) return;
-
-      const me = socket.data.userName || socketToUser.get(socket.id);
-      const friend = normalizeName(
-        typeof data === "string" ? data : data?.friend
-      );
-
-      if (!me || !friend) return;
-
-      await deleteFriendship(me, friend);
-
-      socket.emit("friend_deleted_successfully", {
-        message: `تم حذف ${friend} من قائمة الأصدقاء`,
-      });
-
-      await emitToUser(friend, "friend_deleted_me", {
+      const msg = await PrivateMessage.create({
         from: me,
-        message: `قام ${me} بحذفك من قائمة الأصدقاء`,
+        to,
+        text: cleanText,
+        conversationKey: pairKey(me, to)
       });
+      
+      await emitToUser(to, "private_message_received", msg);
+      socket.emit("pm_sent_success", { msgId: msg._id });
     } catch (err) {
-      console.error("delete_friend error:", err);
+      logInfo("Error", "Private message system failure", err);
+      socket.emit("error_msg", { message: "Private message failed" });
     }
   });
 
+  // إدارة انقطاع الاتصال
   socket.on("disconnect", async () => {
-    try {
-      if (!isDbReady()) return;
-
-      const userName = socket.data.userName || socketToUser.get(socket.id);
-
-      if (userName) {
-        await setUserOffline(userName);
-        removeFromQueue(userName);
-
-        const pendingKey = pendingMatchByUser.get(userName);
-        if (pendingKey) {
-          const proposal = pendingMatches.get(pendingKey);
-          if (proposal) {
-            const partner =
-              proposal.userA === userName ? proposal.userB : proposal.userA;
-            clearPendingProposal(proposal.userA, proposal.userB);
-            await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
-            await emitToUser(partner, "match_closed", {
-              reason: "partner_disconnected",
-            });
-            await tryMatch(partner);
-          }
-        }
-
-        const partner = activeMatches.get(userName);
-        if (partner) {
-          activeMatches.delete(userName);
-          activeMatches.delete(partner);
-          await emitSystemMessage(partner, "انقطع اتصال الطرف الآخر");
-        }
+    const me = socket.data.userName;
+    logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
+    
+    if (me) {
+      // إنهاء المحادثات النشطة
+      const partner = activeMatches.get(me);
+      if (partner) {
+        activeMatches.delete(me);
+        activeMatches.delete(partner);
+        await emitToUser(partner, "match_closed", { reason: "partner_disconnected" });
       }
 
-      socketToUser.delete(socket.id);
-      logInfo("socket", `disconnected ${socket.id}`, { userName });
-    } catch (err) {
-      console.error("disconnect error:", err);
+      // تنظيف طلبات المطابقة المعلقة
+      const pKey = pendingMatchByUser.get(me);
+      if (pKey) {
+          const prop = pendingMatches.get(pKey);
+          if (prop) {
+              if (prop.timeoutId) {
+                clearTimeout(prop.timeoutId);
+              }
+              const other = prop.userA === me ? prop.userB : prop.userA;
+              pendingMatches.delete(pKey);
+              pendingMatchByUser.delete(me);
+              pendingMatchByUser.delete(other);
+              await emitToUser(other, "match_cancelled", { reason: "partner_left" });
+          }
+      }
+
+      removeFromQueue(me);
+
+      // تنظيف مؤشر typing إن وجد
+      const partnerName = activeMatches.get(me);
+      if (partnerName) {
+        const typingKey = pairKey(me, partnerName);
+        const timeoutId = userTypingTimeout.get(typingKey);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          userTypingTimeout.delete(typingKey);
+        }
+      }
+      
+      // تحديث حالة قاعدة البيانات
+      const currentSocketId = userToSocket.get(me);
+      if (currentSocketId === socket.id) {
+        userToSocket.delete(me);
+        await User.findOneAndUpdate(
+          { userName: me }, 
+          { online: false, lastSeen: new Date(), socketId: null }
+        );
+      }
+    }
+    socketToUser.delete(socket.id);
+  });
+});
+
+// ==========================================
+// 7. نقاط النهاية (API Endpoints)
+// ==========================================
+
+app.get("/", (req, res) => {
+    res.send("Fadfad Master Server is running perfectly.");
+});
+
+app.get("/health", async (req, res) => {
+  const dbStatus = mongoose.connection.readyState;
+  res.json({
+    status: "active",
+    database: dbStatus === 1 ? "connected" : "error",
+    metrics: {
+        onlineUsers: userToSocket.size,
+        queueSize: waitingQueue.length,
+        ongoingChats: activeMatches.size / 2,
+        pendingProposals: pendingMatches.size
+    },
+    system: {
+        uptime: process.uptime(),
+        memory: process.memoryUsage().heapUsed / 1024 / 1024 + " MB",
+        platform: process.platform
     }
   });
 });
 
-async function startServer() {
-  try {
-    await mongoose.connect(DATABASE_URL, {
-      serverSelectionTimeoutMS: 15000,
-    });
+// ==========================================
+// 8. تشغيل السيرفر وحماية العمليات
+// ==========================================
 
-    logInfo("startup", "MongoDB connected");
-    server.listen(PORT, () => {
-      logInfo("startup", `Server running on port ${PORT}`);
+async function startMasterServer() {
+  try {
+    logInfo("System", "Initializing database connection...");
+    await mongoose.connect(DATABASE_URL, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000
+    });
+    logInfo("System", "Database connection established.");
+
+    server.listen(PORT, "0.0.0.0", () => {
+      logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
+      logInfo("System", "Ready to receive connections from Flutter app.");
     });
   } catch (err) {
-    console.error("MongoDB connection failed:");
-    console.error(err.message);
+    logInfo("Critical", "Failed to start Master Server", err);
     process.exit(1);
   }
 }
 
-startServer();
+// تشغيل النظام
+startMasterServer();
 
+// معالجة الأخطاء الكارثية لمنع السيرفر من الانهيار الدائم
+process.on("unhandledRejection", (reason, promise) => {
+  logInfo("Critical", "Unhandled Promise Rejection detected", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  logInfo("Critical", "Uncaught Exception detected! System remains stable.", err);
+});
