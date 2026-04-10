@@ -508,6 +508,41 @@ io.on("connection", (socket) => {
     tryMatch(socket.data.userName);
   });
 
+  socket.on("stop_search", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      removeFromQueue(me);
+
+      const pendingKey = pendingMatchByUser.get(me);
+      if (pendingKey) {
+        const proposal = pendingMatches.get(pendingKey);
+        if (proposal) {
+          if (proposal.timeoutId) {
+            clearTimeout(proposal.timeoutId);
+          }
+
+          const other = proposal.userA === me ? proposal.userB : proposal.userA;
+
+          pendingMatches.delete(pendingKey);
+          pendingMatchByUser.delete(proposal.userA);
+          pendingMatchByUser.delete(proposal.userB);
+
+          await emitToUser(other, "match_cancelled", {
+            reason: "partner_stopped_search"
+          });
+        }
+      }
+
+      socket.emit("search_stopped", { success: true });
+      logInfo("Matchmaking", `User ${me} stopped matchmaking.`);
+    } catch (err) {
+      logInfo("Error", "stop_search failed", err);
+      socket.emit("error_msg", { message: "Failed to stop search" });
+    }
+  });
+
   socket.on("accept_match", async () => {
     try {
       const me = socket.data.userName;
