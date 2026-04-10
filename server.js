@@ -163,7 +163,6 @@ const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
 const userTypingTimeout = new Map();
 
-// إضافات إصلاحية بدون حذف منطقك
 const userToSocket = new Map();
 const matchmakingLocks = new Set();
 const MATCH_PROPOSAL_TTL = 30000;
@@ -201,15 +200,10 @@ function removeFromQueue(userName) {
   }
 }
 
-async function checkDatabaseConnection() {
-  return mongoose.connection.readyState === 1;
-}
-
 async function getUserSocket(userName) {
   try {
     const cleanName = normalizeName(userName);
 
-    // أولوية لذاكرة السيرفر السريعة
     const directSocketId = userToSocket.get(cleanName);
     if (directSocketId) {
       const directSocket = io.sockets.sockets.get(directSocketId);
@@ -323,34 +317,6 @@ function releaseMatchLock(userName) {
   matchmakingLocks.delete(cleanName);
 }
 
-async function cleanupPendingProposalByKey(key, reason = "cancelled", requeueOther = false, requeueMe = false) {
-  const proposal = pendingMatches.get(key);
-  if (!proposal) return null;
-
-  if (proposal.timeoutId) {
-    clearTimeout(proposal.timeoutId);
-  }
-
-  pendingMatches.delete(key);
-  pendingMatchByUser.delete(proposal.userA);
-  pendingMatchByUser.delete(proposal.userB);
-
-  const userA = proposal.userA;
-  const userB = proposal.userB;
-
-  await emitToUser(userA, "match_cancelled", { reason });
-  await emitToUser(userB, "match_cancelled", { reason });
-
-  if (requeueMe) {
-    tryMatch(userA);
-  }
-  if (requeueOther) {
-    tryMatch(userB);
-  }
-
-  return proposal;
-}
-
 function createPendingMatchEntry(userA, userB) {
   const key = pairKey(userA, userB);
 
@@ -405,7 +371,6 @@ async function tryMatch(userName) {
   try {
     logInfo("Matchmaking", `User ${me} requested a new match.`);
 
-    // منع المستخدم إذا كان بالفعل في محادثة أو طلب معلق
     if (activeMatches.has(me) || pendingMatchByUser.has(me)) {
       logInfo("Matchmaking", `User ${me} is already busy, skipping request.`);
       return;
@@ -414,7 +379,6 @@ async function tryMatch(userName) {
     removeFromQueue(me);
 
     let partner = null;
-    // فحص طابور الانتظار
     for (let i = 0; i < waitingQueue.length; i++) {
       const candidate = waitingQueue[i];
       if (candidate === me) continue;
@@ -437,7 +401,6 @@ async function tryMatch(userName) {
         waitingQueue.splice(i, 1);
         break;
       } else {
-        // تنظيف الطابور من المستخدمين غير المتصلين
         waitingQueue.splice(i, 1);
         i--;
       }
@@ -476,13 +439,11 @@ async function tryMatch(userName) {
 io.on("connection", (socket) => {
   logInfo("Network", `Socket connected: ${socket.id}`);
 
-  // حدث التسجيل الأساسي
   socket.on("register_user", async (rawName) => {
     try {
       const userName = normalizeName(rawName);
       if (!userName) return;
 
-      // إغلاق أي جلسة قديمة لنفس المستخدم
       const existingUser = await User.findOne({ userName }).select("socketId").lean();
       if (existingUser?.socketId && existingUser.socketId !== socket.id) {
         const oldSocket = io.sockets.sockets.get(existingUser.socketId);
@@ -515,7 +476,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // تحديث بيانات الملف الشخصي
   socket.on("update_profile", async (data) => {
     try {
       const me = socket.data.userName;
@@ -544,7 +504,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // أوامر الشات العشوائي
   socket.on("find_partner", () => {
     tryMatch(socket.data.userName);
   });
@@ -619,14 +578,12 @@ io.on("connection", (socket) => {
         await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
       }
       
-      // محاولة مطابقة فورية بعد السكيب
       tryMatch(me);
     } catch (err) {
       logInfo("Error", "skip_partner failed", err);
     }
   });
 
-  // مراسلات الشات العشوائي
   socket.on("message", async (msgContent) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
@@ -695,7 +652,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // نظام الأصدقاء
   socket.on("send_friend_request", async (targetName) => {
     const me = socket.data.userName;
     const to = extractTargetName(targetName);
@@ -814,6 +770,13 @@ io.on("connection", (socket) => {
 
       await Friendship.deleteOne({ pairKey: pairKey(me, friendName) });
 
+      await FriendRequest.deleteMany({
+        $or: [
+          { from: me, to: friendName },
+          { from: friendName, to: me }
+        ]
+      });
+
       await emitToUser(friendName, "friend_deleted_me", {
         from: me,
         message: `${me} removed you from friends`
@@ -831,6 +794,56 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("get_private_history", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const other = normalizeName(data?.to || data?.friend || data?.with || data?.userName);
+
+      if (!me || !other) {
+        return socket.emit("private_history", []);
+      }
+
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, other) }).lean();
+      if (!isFriend) {
+        return socket.emit("private_history", []);
+      }
+
+      const messages = await PrivateMessage.find({
+        conversationKey: pairKey(me, other),
+        isDeleted: false
+      })
+        .sort({ time: 1, createdAt: 1 })
+        .lean();
+
+      socket.emit("private_history", messages);
+    } catch (err) {
+      logInfo("Error", "Failed to load private history", err);
+      socket.emit("private_history", []);
+    }
+  });
+
+  socket.on("mark_messages_read", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const friend = normalizeName(data?.friend || data?.from || data?.to);
+
+      if (!me || !friend) return;
+
+      await PrivateMessage.updateMany(
+        {
+          conversationKey: pairKey(me, friend),
+          to: me,
+          readBy: { $ne: me }
+        },
+        {
+          $addToSet: { readBy: me }
+        }
+      );
+    } catch (err) {
+      logInfo("Error", "Failed to mark messages as read", err);
+    }
+  });
+
   socket.on("private_message", async (data) => {
     const me = socket.data.userName;
     const to = normalizeName(data?.to);
@@ -838,34 +851,44 @@ io.on("connection", (socket) => {
     if (!me || !to || !cleanText) return;
 
     try {
-      // التأكد من وجود صداقة قبل إرسال رسالة خاصة
-      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) });
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
       if (!isFriend) {
-          return socket.emit("error_msg", { message: "Not friends yet" });
+        return socket.emit("error_msg", { message: "Not friends yet" });
       }
 
       const msg = await PrivateMessage.create({
         from: me,
         to,
         text: cleanText,
+        conversationKey: pairKey(me, to),
+        time: new Date(),
+        readBy: [me]
+      });
+
+      const plainMsg = msg.toObject ? msg.toObject() : msg;
+
+      const delivered = await emitToUser(to, "private_message_received", plainMsg);
+
+      socket.emit("pm_sent_success", {
+        msgId: msg._id,
+        delivered: delivered === true
+      });
+
+      logInfo("PrivateChat", `Message sent from ${me} to ${to}`, {
+        delivered: delivered === true,
         conversationKey: pairKey(me, to)
       });
-      
-      await emitToUser(to, "private_message_received", msg);
-      socket.emit("pm_sent_success", { msgId: msg._id });
     } catch (err) {
       logInfo("Error", "Private message system failure", err);
       socket.emit("error_msg", { message: "Private message failed" });
     }
   });
 
-  // إدارة انقطاع الاتصال
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
     
     if (me) {
-      // إنهاء المحادثات النشطة
       const partner = activeMatches.get(me);
       if (partner) {
         activeMatches.delete(me);
@@ -873,7 +896,6 @@ io.on("connection", (socket) => {
         await emitToUser(partner, "match_closed", { reason: "partner_disconnected" });
       }
 
-      // تنظيف طلبات المطابقة المعلقة
       const pKey = pendingMatchByUser.get(me);
       if (pKey) {
           const prop = pendingMatches.get(pKey);
@@ -891,18 +913,17 @@ io.on("connection", (socket) => {
 
       removeFromQueue(me);
 
-      // تنظيف مؤشر typing إن وجد
-      const partnerName = activeMatches.get(me);
-      if (partnerName) {
-        const typingKey = pairKey(me, partnerName);
-        const timeoutId = userTypingTimeout.get(typingKey);
-        if (timeoutId) {
+      const typingKeysToDelete = [];
+      for (const [typingKey, timeoutId] of userTypingTimeout.entries()) {
+        if (typingKey.includes(me)) {
           clearTimeout(timeoutId);
-          userTypingTimeout.delete(typingKey);
+          typingKeysToDelete.push(typingKey);
         }
       }
+      for (const key of typingKeysToDelete) {
+        userTypingTimeout.delete(key);
+      }
       
-      // تحديث حالة قاعدة البيانات
       const currentSocketId = userToSocket.get(me);
       if (currentSocketId === socket.id) {
         userToSocket.delete(me);
@@ -966,10 +987,8 @@ async function startMasterServer() {
   }
 }
 
-// تشغيل النظام
 startMasterServer();
 
-// معالجة الأخطاء الكارثية لمنع السيرفر من الانهيار الدائم
 process.on("unhandledRejection", (reason, promise) => {
   logInfo("Critical", "Unhandled Promise Rejection detected", reason);
 });
