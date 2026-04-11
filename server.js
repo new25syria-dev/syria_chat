@@ -844,8 +844,14 @@ io.on("connection", (socket) => {
           pendingMatchByUser.delete(me);
           pendingMatchByUser.delete(other);
 
-          await emitToUser(other, "match_cancelled", { reason: "partner_skipped" });
-          logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}`);
+          await emitToUser(other, "match_searching", {
+            status: "searching",
+            message: "Searching for a new partner..."
+          });
+
+          logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}. Restarting search for both users.`);
+
+          tryMatch(other);
         }
 
         return tryMatch(me);
@@ -856,7 +862,13 @@ io.on("connection", (socket) => {
       if (partner) {
         activeMatches.delete(me);
         activeMatches.delete(partner);
-        await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
+
+        await emitToUser(partner, "match_searching", {
+          status: "searching",
+          message: "Searching for a new partner..."
+        });
+
+        tryMatch(partner);
       }
 
       tryMatch(me);
