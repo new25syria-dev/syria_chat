@@ -213,17 +213,15 @@ async function getUserSocket(userName) {
     const directSocketId = userToSocket.get(cleanName);
     if (directSocketId) {
       const directSocket = io.sockets.sockets.get(directSocketId);
-      if (directSocket) {
-        return directSocket;
-      }
+      if (directSocket) return directSocket;
       logInfo("Socket", `Direct socket mapping for ${cleanName} is stale: ${directSocketId}`);
       userToSocket.delete(cleanName);
     }
 
-    const user = await User.findOne({ userName: cleanName }).select("socketId online").lean();
+    const user = await User.findOne({ userName: cleanName }).select("socketId").lean();
 
     if (!user) {
-      logInfo("Socket", `No DB user found for ${cleanName}`);
+      logInfo("Socket", `No user found in DB for ${cleanName}`);
       return null;
     }
 
@@ -233,9 +231,8 @@ async function getUserSocket(userName) {
     }
 
     const socket = io.sockets.sockets.get(user.socketId);
-
     if (!socket) {
-      logInfo("Socket", `Socket ${user.socketId} for ${cleanName} is not active on server`);
+      logInfo("Socket", `Socket ${user.socketId} for ${cleanName} not found in active sockets`);
       return null;
     }
 
@@ -373,13 +370,8 @@ async function ensureUserRegistrationState(userName, socketId = null) {
 async function validateUserReadyForMatchmaking(userName, socket) {
   try {
     const me = normalizeName(userName);
-    if (!me) {
-      return { ok: false, reason: "missing_user" };
-    }
-
-    if (!socket || !socket.id) {
-      return { ok: false, reason: "missing_socket" };
-    }
+    if (!me) return { ok: false, reason: "missing_user" };
+    if (!socket || !socket.id) return { ok: false, reason: "missing_socket" };
 
     const dbUser = await User.findOne({ userName: me }).select("socketId online").lean();
 
@@ -457,6 +449,13 @@ async function clearUserBusyState(userName, reason = "state_cleared") {
   const me = normalizeName(userName);
   if (!me) return;
 
+  logInfo("Matchmaking", `clearUserBusyState called for ${me}`, {
+    reason,
+    inQueue: waitingQueue.includes(me),
+    activePartner: activeMatches.get(me) || null,
+    pendingKey: pendingMatchByUser.get(me) || null
+  });
+
   removeFromQueue(me);
 
   const activePartner = activeMatches.get(me);
@@ -473,11 +472,22 @@ async function clearUserBusyState(userName, reason = "state_cleared") {
       if (proposal.timeoutId) {
         clearTimeout(proposal.timeoutId);
       }
+
       const other = proposal.userA === me ? proposal.userB : proposal.userA;
+
       pendingMatches.delete(pendingKey);
       pendingMatchByUser.delete(proposal.userA);
       pendingMatchByUser.delete(proposal.userB);
-      await emitToUser(other, "match_cancelled", { reason });
+
+      if (reason === "partner_stopped_search") {
+        await emitToUser(other, "match_searching", {
+          status: "searching",
+          message: "Searching for a new partner..."
+        });
+        tryMatch(other);
+      } else {
+        await emitToUser(other, "match_cancelled", { reason });
+      }
     } else {
       pendingMatchByUser.delete(me);
     }
@@ -691,7 +701,8 @@ io.on("connection", (socket) => {
           country: data?.country ?? "",
           age: data?.age ?? null,
           bio: data?.bio ?? "",
-          gender: data?.gender ?? "unspecified"
+          gender: data?.gender ?? "unspecified",
+          lastSeen: new Date()
         },
         { returnDocument: "after" }
       );
@@ -735,10 +746,43 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) return;
 
+      const cleanMe = normalizeName(me);
+      const wasInQueue = waitingQueue.includes(cleanMe);
+      const hadPendingMatch = pendingMatchByUser.has(cleanMe);
+      const hadActiveMatch = activeMatches.has(cleanMe);
+
+      logInfo("Matchmaking", `stop_search requested by ${me}`, {
+        wasInQueue,
+        hadPendingMatch,
+        hadActiveMatch,
+        queueSnapshotBefore: [...waitingQueue]
+      });
+
+      if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
+        removeFromQueue(me);
+
+        socket.emit("search_stopped", {
+          success: true,
+          mode: "queue_only"
+        });
+
+        logInfo("Matchmaking", `User ${me} stopped queue-only matchmaking.`, {
+          queueSnapshotAfter: [...waitingQueue]
+        });
+
+        return;
+      }
+
       await clearUserBusyState(me, "partner_stopped_search");
 
-      socket.emit("search_stopped", { success: true });
-      logInfo("Matchmaking", `User ${me} stopped matchmaking.`);
+      socket.emit("search_stopped", {
+        success: true,
+        mode: "relationship_state"
+      });
+
+      logInfo("Matchmaking", `User ${me} stopped matchmaking.`, {
+        queueSnapshotAfter: [...waitingQueue]
+      });
     } catch (err) {
       logInfo("Error", "stop_search failed", err);
       socket.emit("error_msg", { message: "Failed to stop search" });
@@ -1177,7 +1221,11 @@ io.on("connection", (socket) => {
         userToSocket.delete(me);
         await User.findOneAndUpdate(
           { userName: me },
-          { online: false, lastSeen: new Date(), socketId: null }
+          {
+            online: false,
+            lastSeen: new Date(),
+            socketId: null
+          }
         );
       }
     }
