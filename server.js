@@ -194,9 +194,14 @@ function pairKey(a, b) {
 
 function removeFromQueue(userName) {
   const cleanName = normalizeName(userName);
-  const index = waitingQueue.indexOf(cleanName);
-  if (index !== -1) {
-    waitingQueue.splice(index, 1);
+  let removed = false;
+  for (let i = waitingQueue.length - 1; i >= 0; i--) {
+    if (waitingQueue[i] === cleanName) {
+      waitingQueue.splice(i, 1);
+      removed = true;
+    }
+  }
+  if (removed) {
     logInfo("Queue", `User ${cleanName} removed from waiting list.`);
   }
 }
@@ -366,6 +371,100 @@ async function forceRefreshUserSocketState(userName) {
   }
 }
 
+async function clearUserBusyState(userName, reason = "state_cleared") {
+  const me = normalizeName(userName);
+  if (!me) return;
+
+  removeFromQueue(me);
+
+  const activePartner = activeMatches.get(me);
+  if (activePartner) {
+    activeMatches.delete(me);
+    activeMatches.delete(activePartner);
+    await emitToUser(activePartner, "match_closed", { reason });
+  }
+
+  const pendingKey = pendingMatchByUser.get(me);
+  if (pendingKey) {
+    const proposal = pendingMatches.get(pendingKey);
+    if (proposal) {
+      if (proposal.timeoutId) {
+        clearTimeout(proposal.timeoutId);
+      }
+      const other = proposal.userA === me ? proposal.userB : proposal.userA;
+      pendingMatches.delete(pendingKey);
+      pendingMatchByUser.delete(proposal.userA);
+      pendingMatchByUser.delete(proposal.userB);
+      await emitToUser(other, "match_cancelled", { reason });
+    } else {
+      pendingMatchByUser.delete(me);
+    }
+  }
+}
+
+async function clearRelationshipRuntimeState(userA, userB) {
+  const a = normalizeName(userA);
+  const b = normalizeName(userB);
+  if (!a || !b) return;
+
+  removeFromQueue(a);
+  removeFromQueue(b);
+
+  const activeA = activeMatches.get(a);
+  if (activeA === b) {
+    activeMatches.delete(a);
+    activeMatches.delete(b);
+  }
+
+  const activeB = activeMatches.get(b);
+  if (activeB === a) {
+    activeMatches.delete(a);
+    activeMatches.delete(b);
+  }
+
+  const pendingKeyA = pendingMatchByUser.get(a);
+  if (pendingKeyA) {
+    const proposalA = pendingMatches.get(pendingKeyA);
+    if (proposalA) {
+      const involvesPair =
+        [proposalA.userA, proposalA.userB].includes(a) &&
+        [proposalA.userA, proposalA.userB].includes(b);
+
+      if (involvesPair) {
+        if (proposalA.timeoutId) {
+          clearTimeout(proposalA.timeoutId);
+        }
+        pendingMatches.delete(pendingKeyA);
+        pendingMatchByUser.delete(proposalA.userA);
+        pendingMatchByUser.delete(proposalA.userB);
+      }
+    } else {
+      pendingMatchByUser.delete(a);
+    }
+  }
+
+  const pendingKeyB = pendingMatchByUser.get(b);
+  if (pendingKeyB) {
+    const proposalB = pendingMatches.get(pendingKeyB);
+    if (proposalB) {
+      const involvesPair =
+        [proposalB.userA, proposalB.userB].includes(a) &&
+        [proposalB.userA, proposalB.userB].includes(b);
+
+      if (involvesPair) {
+        if (proposalB.timeoutId) {
+          clearTimeout(proposalB.timeoutId);
+        }
+        pendingMatches.delete(pendingKeyB);
+        pendingMatchByUser.delete(proposalB.userA);
+        pendingMatchByUser.delete(proposalB.userB);
+      }
+    } else {
+      pendingMatchByUser.delete(b);
+    }
+  }
+}
+
 // ==========================================
 // 5. منطق المطابقة (Matchmaking System)
 // ==========================================
@@ -524,27 +623,7 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) return;
 
-      removeFromQueue(me);
-
-      const pendingKey = pendingMatchByUser.get(me);
-      if (pendingKey) {
-        const proposal = pendingMatches.get(pendingKey);
-        if (proposal) {
-          if (proposal.timeoutId) {
-            clearTimeout(proposal.timeoutId);
-          }
-
-          const other = proposal.userA === me ? proposal.userB : proposal.userA;
-
-          pendingMatches.delete(pendingKey);
-          pendingMatchByUser.delete(proposal.userA);
-          pendingMatchByUser.delete(proposal.userB);
-
-          await emitToUser(other, "match_cancelled", {
-            reason: "partner_stopped_search"
-          });
-        }
-      }
+      await clearUserBusyState(me, "partner_stopped_search");
 
       socket.emit("search_stopped", { success: true });
       logInfo("Matchmaking", `User ${me} stopped matchmaking.`);
@@ -828,6 +907,8 @@ io.on("connection", (socket) => {
       await PrivateMessage.deleteMany({
         conversationKey: currentPairKey
       });
+
+      await clearRelationshipRuntimeState(me, friendName);
 
       socket.emit("friend_deleted_successfully", {
         friend: friendName,
