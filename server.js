@@ -124,6 +124,7 @@ const privateMessageSchema = new mongoose.Schema(
     to: { type: String, required: true, trim: true, index: true },
     text: { type: String, default: "", trim: true },
     imageUrl: { type: String, default: "" },
+    voiceUrl: { type: String, default: "" },
     time: { type: Date, default: Date.now, index: true },
     conversationKey: { type: String, required: true, index: true },
     readBy: { type: [String], default: [] },
@@ -353,6 +354,16 @@ function createPendingMatchEntry(userA, userB) {
   pendingMatchByUser.set(userB, key);
 
   return key;
+}
+
+async function forceRefreshUserSocketState(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+
+  const socket = await getUserSocket(cleanName);
+  if (socket) {
+    socket.emit("social_state_refresh", { success: true });
+  }
 }
 
 // ==========================================
@@ -758,6 +769,8 @@ io.on("connection", (socket) => {
         await emitToUser(from, "friend_request_accepted", { by: me });
         await emitToUser(me, "friend_added_successfully", from);
         await emitToUser(from, "friend_added_successfully", me);
+        await forceRefreshUserSocketState(me);
+        await forceRefreshUserSocketState(from);
         logInfo("Social", `${me} and ${from} are now friends.`);
       } else {
         request.status = "rejected";
@@ -801,33 +814,9 @@ io.on("connection", (socket) => {
         pairKey: currentPairKey
       }).lean();
 
-      if (!existingFriendship) {
-        await FriendRequest.deleteMany({
-          $or: [
-            { from: me, to: friendName },
-            { from: friendName, to: me }
-          ]
-        });
-
-        await PrivateMessage.deleteMany({
-          conversationKey: currentPairKey
-        });
-
-        socket.emit("friend_deleted_successfully", {
-          friend: friendName,
-          message: `Removed ${friendName} from friends`
-        });
-
-        await emitToUser(friendName, "friend_deleted_me", {
-          from: me,
-          message: `${me} removed you from friends`
-        });
-
-        logInfo("Social", `${me} cleanup completed with ${friendName} even without active friendship record.`);
-        return;
+      if (existingFriendship) {
+        await Friendship.deleteOne({ pairKey: currentPairKey });
       }
-
-      await Friendship.deleteOne({ pairKey: currentPairKey });
 
       await FriendRequest.deleteMany({
         $or: [
@@ -849,6 +838,9 @@ io.on("connection", (socket) => {
         from: me,
         message: `${me} removed you from friends`
       });
+
+      await forceRefreshUserSocketState(me);
+      await forceRefreshUserSocketState(friendName);
 
       logInfo("Social", `${me} removed ${friendName} from friends and deleted all related data.`);
     } catch (err) {
