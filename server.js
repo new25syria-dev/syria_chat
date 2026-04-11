@@ -690,6 +690,9 @@ io.on("connection", (socket) => {
 
           await emitToUser(other, "match_cancelled", { reason: "partner_skipped" });
           logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}`);
+
+          // إضافة: إعادة الطرف الآخر تلقائيًا إلى البحث
+          tryMatch(other);
         }
 
         return tryMatch(me);
@@ -701,6 +704,9 @@ io.on("connection", (socket) => {
         activeMatches.delete(me);
         activeMatches.delete(partner);
         await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
+
+        // إضافة: إعادة الطرف الآخر تلقائيًا إلى البحث
+        tryMatch(partner);
       }
 
       tryMatch(me);
