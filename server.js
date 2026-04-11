@@ -213,13 +213,32 @@ async function getUserSocket(userName) {
     const directSocketId = userToSocket.get(cleanName);
     if (directSocketId) {
       const directSocket = io.sockets.sockets.get(directSocketId);
-      if (directSocket) return directSocket;
+      if (directSocket) {
+        return directSocket;
+      }
+      logInfo("Socket", `Direct socket mapping for ${cleanName} is stale: ${directSocketId}`);
       userToSocket.delete(cleanName);
     }
 
-    const user = await User.findOne({ userName: cleanName }).select("socketId").lean();
-    if (!user || !user.socketId) return null;
+    const user = await User.findOne({ userName: cleanName }).select("socketId online").lean();
+
+    if (!user) {
+      logInfo("Socket", `No DB user found for ${cleanName}`);
+      return null;
+    }
+
+    if (!user.socketId) {
+      logInfo("Socket", `User ${cleanName} has no socketId in DB`);
+      return null;
+    }
+
     const socket = io.sockets.sockets.get(user.socketId);
+
+    if (!socket) {
+      logInfo("Socket", `Socket ${user.socketId} for ${cleanName} is not active on server`);
+      return null;
+    }
+
     return socket || null;
   } catch (err) {
     logInfo("Critical", `Error in getUserSocket for ${userName}`, err);
@@ -321,6 +340,69 @@ function releaseMatchLock(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return;
   matchmakingLocks.delete(cleanName);
+}
+
+async function ensureUserRegistrationState(userName, socketId = null) {
+  try {
+    const cleanName = normalizeName(userName);
+    if (!cleanName) return false;
+
+    const updateData = {
+      online: true,
+      lastSeen: new Date()
+    };
+
+    if (socketId) {
+      updateData.socketId = socketId;
+      userToSocket.set(cleanName, socketId);
+    }
+
+    await User.findOneAndUpdate(
+      { userName: cleanName },
+      updateData,
+      { upsert: true, returnDocument: "after" }
+    );
+
+    return true;
+  } catch (err) {
+    logInfo("User", `Failed to ensure registration state for ${userName}`, err);
+    return false;
+  }
+}
+
+async function validateUserReadyForMatchmaking(userName, socket) {
+  try {
+    const me = normalizeName(userName);
+    if (!me) {
+      return { ok: false, reason: "missing_user" };
+    }
+
+    if (!socket || !socket.id) {
+      return { ok: false, reason: "missing_socket" };
+    }
+
+    const dbUser = await User.findOne({ userName: me }).select("socketId online").lean();
+
+    if (!dbUser) {
+      await ensureUserRegistrationState(me, socket.id);
+      logInfo("Matchmaking", `Auto-created missing DB user for ${me} before matchmaking.`);
+      return { ok: true };
+    }
+
+    if (dbUser.socketId !== socket.id || dbUser.online !== true) {
+      await ensureUserRegistrationState(me, socket.id);
+      logInfo("Matchmaking", `Re-synced user ${me} socket before matchmaking.`, {
+        previousSocketId: dbUser.socketId || null,
+        currentSocketId: socket.id,
+        previousOnline: dbUser.online === true
+      });
+    }
+
+    return { ok: true };
+  } catch (err) {
+    logInfo("Matchmaking", `Failed to validate user readiness for ${userName}`, err);
+    return { ok: false, reason: "validation_failed" };
+  }
 }
 
 function createPendingMatchEntry(userA, userB) {
@@ -481,6 +563,13 @@ async function tryMatch(userName) {
   try {
     logInfo("Matchmaking", `User ${me} requested a new match.`);
 
+    const mySocket = await getUserSocket(me);
+    if (!mySocket) {
+      logInfo("Matchmaking", `User ${me} has no active socket. Search aborted.`);
+      await emitToUser(me, "error_msg", { message: "User is not fully connected yet" });
+      return;
+    }
+
     if (activeMatches.has(me) || pendingMatchByUser.has(me)) {
       logInfo("Matchmaking", `User ${me} is already busy, skipping request.`);
       return;
@@ -494,6 +583,7 @@ async function tryMatch(userName) {
       if (candidate === me) continue;
 
       if (matchmakingLocks.has(candidate)) {
+        logInfo("Matchmaking", `Candidate ${candidate} skipped because lock is active.`);
         continue;
       }
 
@@ -502,6 +592,7 @@ async function tryMatch(userName) {
       }).lean();
 
       if (alreadyFriends) {
+        logInfo("Matchmaking", `Candidate ${candidate} skipped because already friends with ${me}.`);
         continue;
       }
 
@@ -511,6 +602,7 @@ async function tryMatch(userName) {
         waitingQueue.splice(i, 1);
         break;
       } else {
+        logInfo("Matchmaking", `Candidate ${candidate} skipped because no active socket or already busy.`);
         waitingQueue.splice(i, 1);
         i--;
       }
@@ -580,6 +672,7 @@ io.on("connection", (socket) => {
 
       logInfo("User", `Registered & Online: ${userName}`);
       socket.emit("registration_success", { userName, timestamp: new Date() });
+      socket.emit("user_ready_for_matchmaking", { success: true, userName, socketId: socket.id });
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
       socket.emit("error_msg", { message: "Registration process failed" });
@@ -614,8 +707,27 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("find_partner", () => {
-    tryMatch(socket.data.userName);
+  socket.on("find_partner", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) {
+        logInfo("Matchmaking", `Socket ${socket.id} attempted matchmaking before registration.`);
+        socket.emit("error_msg", { message: "Please register user before matchmaking" });
+        return;
+      }
+
+      const readiness = await validateUserReadyForMatchmaking(me, socket);
+      if (!readiness.ok) {
+        logInfo("Matchmaking", `User ${me} is not ready for matchmaking.`, readiness);
+        socket.emit("error_msg", { message: "User is not ready for matchmaking yet" });
+        return;
+      }
+
+      await tryMatch(me);
+    } catch (err) {
+      logInfo("Error", "find_partner failed", err);
+      socket.emit("error_msg", { message: "Failed to start search" });
+    }
   });
 
   socket.on("stop_search", async () => {
@@ -690,9 +802,6 @@ io.on("connection", (socket) => {
 
           await emitToUser(other, "match_cancelled", { reason: "partner_skipped" });
           logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}`);
-
-          // إضافة: إعادة الطرف الآخر تلقائيًا إلى البحث
-          tryMatch(other);
         }
 
         return tryMatch(me);
@@ -704,9 +813,6 @@ io.on("connection", (socket) => {
         activeMatches.delete(me);
         activeMatches.delete(partner);
         await emitToUser(partner, "match_closed", { reason: "partner_skipped" });
-
-        // إضافة: إعادة الطرف الآخر تلقائيًا إلى البحث
-        tryMatch(partner);
       }
 
       tryMatch(me);
