@@ -1386,6 +1386,85 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("webrtc_offer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = normalizeName(data?.to);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_offer", {
+        from: me,
+        sdp,
+        type,
+      });
+
+      logInfo("WebRTC", `Offer relayed from ${me} to ${to}`);
+    } catch (err) {
+      logInfo("Error", "webrtc_offer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay offer" });
+    }
+  });
+
+  socket.on("webrtc_answer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = normalizeName(data?.to);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_answer", {
+        from: me,
+        sdp,
+        type,
+      });
+
+      logInfo("WebRTC", `Answer relayed from ${me} to ${to}`);
+    } catch (err) {
+      logInfo("Error", "webrtc_answer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay answer" });
+    }
+  });
+
+  socket.on("webrtc_ice_candidate", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = normalizeName(data?.to);
+      const candidate = data?.candidate;
+
+      if (!me || !to || !candidate) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_ice_candidate", {
+        from: me,
+        candidate,
+      });
+
+      logInfo("WebRTC", `ICE candidate relayed from ${me} to ${to}`);
+    } catch (err) {
+      logInfo("Error", "webrtc_ice_candidate failed", err);
+      socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
+    }
+  });
+
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
