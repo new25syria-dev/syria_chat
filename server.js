@@ -168,6 +168,11 @@ const userToSocket = new Map();
 const matchmakingLocks = new Set();
 const MATCH_PROPOSAL_TTL = 30000;
 
+const activeCalls = new Map();
+const pendingCalls = new Map();
+const pendingCallByUser = new Map();
+const CALL_RING_TIMEOUT = 30000;
+
 // ==========================================
 // 4. الدوال المساعدة (Helper Functions)
 // ==========================================
@@ -433,6 +438,77 @@ function createPendingMatchEntry(userA, userB) {
   pendingMatchByUser.set(userB, key);
 
   return key;
+}
+
+function isUserBusyForCall(userName) {
+  const cleanName = normalizeName(userName);
+  return activeCalls.has(cleanName) || pendingCallByUser.has(cleanName);
+}
+
+function createPendingCall(caller, callee) {
+  const key = pairKey(caller, callee);
+
+  const timeoutId = setTimeout(async () => {
+    try {
+      const pending = pendingCalls.get(key);
+      if (!pending) return;
+
+      pendingCalls.delete(key);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      await emitToUser(pending.caller, "call_ended", { reason: "no_answer" });
+      await emitToUser(pending.callee, "call_ended", { reason: "no_answer" });
+
+      logInfo("Call", `Call timed out between ${pending.caller} and ${pending.callee}`);
+    } catch (err) {
+      logInfo("Error", "Call timeout cleanup failed", err);
+    }
+  }, CALL_RING_TIMEOUT);
+
+  pendingCalls.set(key, {
+    caller,
+    callee,
+    timeoutId,
+    createdAt: Date.now(),
+  });
+
+  pendingCallByUser.set(caller, key);
+  pendingCallByUser.set(callee, key);
+
+  return key;
+}
+
+async function clearCallStateForUser(userName, reason = "ended") {
+  const me = normalizeName(userName);
+  if (!me) return;
+
+  const activePartner = activeCalls.get(me);
+  if (activePartner) {
+    activeCalls.delete(me);
+    activeCalls.delete(activePartner);
+    await emitToUser(activePartner, "call_ended", { reason });
+  }
+
+  const pendingKey = pendingCallByUser.get(me);
+  if (pendingKey) {
+    const pending = pendingCalls.get(pendingKey);
+    if (pending) {
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      const other = pending.caller === me ? pending.callee : pending.caller;
+
+      pendingCalls.delete(pendingKey);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      await emitToUser(other, "call_ended", { reason });
+    } else {
+      pendingCallByUser.delete(me);
+    }
+  }
 }
 
 async function forceRefreshUserSocketState(userName) {
@@ -1188,11 +1264,135 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("start_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = normalizeName(data?.to);
+
+      if (!me || !to || me === to) return;
+
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      if (!isFriend) {
+        return socket.emit("error_msg", { message: "Not friends yet" });
+      }
+
+      const targetSocket = await getUserSocket(to);
+      if (!targetSocket) {
+        return socket.emit("call_offline", { to });
+      }
+
+      if (isUserBusyForCall(me) || isUserBusyForCall(to)) {
+        return socket.emit("call_busy", { to });
+      }
+
+      createPendingCall(me, to);
+
+      await emitToUser(to, "incoming_call", {
+        from: me,
+        friendId: me,
+      });
+
+      socket.emit("call_ringing", { to });
+
+      logInfo("Call", `Outgoing call from ${me} to ${to}`);
+    } catch (err) {
+      logInfo("Error", "start_private_call failed", err);
+      socket.emit("error_msg", { message: "Failed to start call" });
+    }
+  });
+
+  socket.on("accept_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = normalizeName(data?.from);
+      if (!me || !from) return;
+
+      const key = pendingCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingCalls.delete(key);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      activeCalls.set(pending.caller, pending.callee);
+      activeCalls.set(pending.callee, pending.caller);
+
+      await emitToUser(pending.caller, "call_accepted", { by: pending.callee });
+      await emitToUser(pending.caller, "call_connected", { with: pending.callee });
+      await emitToUser(pending.callee, "call_connected", { with: pending.caller });
+
+      logInfo("Call", `Call connected between ${pending.caller} and ${pending.callee}`);
+    } catch (err) {
+      logInfo("Error", "accept_private_call failed", err);
+    }
+  });
+
+  socket.on("reject_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = normalizeName(data?.from);
+      if (!me || !from) return;
+
+      const key = pendingCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingCalls.delete(key);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      await emitToUser(from, "call_rejected", { by: me });
+      await emitToUser(me, "call_ended", { reason: "rejected" });
+
+      logInfo("Call", `Call rejected by ${me} from ${from}`);
+    } catch (err) {
+      logInfo("Error", "reject_private_call failed", err);
+    }
+  });
+
+  socket.on("end_private_call", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      await clearCallStateForUser(me, "ended");
+    } catch (err) {
+      logInfo("Error", "end_private_call failed", err);
+    }
+  });
+
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
 
     if (me) {
+      await clearCallStateForUser(me, "partner_disconnected");
+
       const partner = activeMatches.get(me);
       if (partner) {
         activeMatches.delete(me);
