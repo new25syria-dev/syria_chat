@@ -3,9 +3,9 @@
 // ==========================================
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
 const dotenv = require("dotenv");
 
-// مصفوفة مسارات ملفات الإعدادات لضمان المرونة القصوى
 const envCandidates = [
   ".env",
   ".nenv",
@@ -38,7 +38,6 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// إعدادات Socket.io المتقدمة لضمان استقرار الاتصال في Flutter
 const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -54,17 +53,19 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 10000;
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
 
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+
 if (!DATABASE_URL) {
   console.error("FATAL ERROR: DATABASE_URL is not defined in any environment file!");
   process.exit(1);
 }
 
-// إعدادات Mongoose لمنع التحذيرات وضمان استقرار قاعدة البيانات
 mongoose.set("strictQuery", true);
 mongoose.set("bufferCommands", false);
 
 // ==========================================
-// 2. تعريف مخططات قاعدة البيانات (Mongoose Schemas)
+// 2. تعريف مخططات قاعدة البيانات
 // ==========================================
 
 const userSchema = new mongoose.Schema(
@@ -155,7 +156,7 @@ const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
 const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
 
 // ==========================================
-// 3. إدارة الحالة في الذاكرة (Memory State)
+// 3. إدارة الحالة في الذاكرة
 // ==========================================
 const socketToUser = new Map();
 const waitingQueue = [];
@@ -174,7 +175,7 @@ const pendingCallByUser = new Map();
 const CALL_RING_TIMEOUT = 30000;
 
 // ==========================================
-// 4. الدوال المساعدة (Helper Functions)
+// 4. دوال مساعدة
 // ==========================================
 
 function logInfo(scope, message, extra = undefined) {
@@ -219,27 +220,14 @@ async function getUserSocket(userName) {
     if (directSocketId) {
       const directSocket = io.sockets.sockets.get(directSocketId);
       if (directSocket) return directSocket;
-      logInfo("Socket", `Direct socket mapping for ${cleanName} is stale: ${directSocketId}`);
       userToSocket.delete(cleanName);
     }
 
     const user = await User.findOne({ userName: cleanName }).select("socketId").lean();
-
-    if (!user) {
-      logInfo("Socket", `No user found in DB for ${cleanName}`);
-      return null;
-    }
-
-    if (!user.socketId) {
-      logInfo("Socket", `User ${cleanName} has no socketId in DB`);
-      return null;
-    }
+    if (!user || !user.socketId) return null;
 
     const socket = io.sockets.sockets.get(user.socketId);
-    if (!socket) {
-      logInfo("Socket", `Socket ${user.socketId} for ${cleanName} not found in active sockets`);
-      return null;
-    }
+    if (!socket) return null;
 
     return socket || null;
   } catch (err) {
@@ -382,17 +370,11 @@ async function validateUserReadyForMatchmaking(userName, socket) {
 
     if (!dbUser) {
       await ensureUserRegistrationState(me, socket.id);
-      logInfo("Matchmaking", `Auto-created missing DB user for ${me} before matchmaking.`);
       return { ok: true };
     }
 
     if (dbUser.socketId !== socket.id || dbUser.online !== true) {
       await ensureUserRegistrationState(me, socket.id);
-      logInfo("Matchmaking", `Re-synced user ${me} socket before matchmaking.`, {
-        previousSocketId: dbUser.socketId || null,
-        currentSocketId: socket.id,
-        previousOnline: dbUser.online === true
-      });
     }
 
     return { ok: true };
@@ -419,8 +401,6 @@ function createPendingMatchEntry(userA, userB) {
 
       tryMatch(proposal.userA);
       tryMatch(proposal.userB);
-
-      logInfo("Matchmaking", `Pending match expired between ${proposal.userA} and ${proposal.userB}`);
     } catch (err) {
       logInfo("Error", "Pending match timeout cleanup failed", err);
     }
@@ -459,8 +439,6 @@ function createPendingCall(caller, callee) {
 
       await emitToUser(pending.caller, "call_ended", { reason: "no_answer" });
       await emitToUser(pending.callee, "call_ended", { reason: "no_answer" });
-
-      logInfo("Call", `Call timed out between ${pending.caller} and ${pending.callee}`);
     } catch (err) {
       logInfo("Error", "Call timeout cleanup failed", err);
     }
@@ -524,13 +502,6 @@ async function forceRefreshUserSocketState(userName) {
 async function clearUserBusyState(userName, reason = "state_cleared") {
   const me = normalizeName(userName);
   if (!me) return;
-
-  logInfo("Matchmaking", `clearUserBusyState called for ${me}`, {
-    reason,
-    inQueue: waitingQueue.includes(me),
-    activePartner: activeMatches.get(me) || null,
-    pendingKey: pendingMatchByUser.get(me) || null
-  });
 
   removeFromQueue(me);
 
@@ -633,33 +604,103 @@ async function clearRelationshipRuntimeState(userA, userB) {
   }
 }
 
+function getFallbackIceServers() {
+  return [{ urls: "stun:stun.l.google.com:19302" }];
+}
+
+function requestTwilioToken() {
+  return new Promise((resolve) => {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    }
+
+    const postData = "Ttl=21600";
+
+    const options = {
+      hostname: "api.twilio.com",
+      port: 443,
+      path: `/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Tokens.json`,
+      method: "POST",
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let body = "";
+
+      res.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+
+          if (Array.isArray(parsed.ice_servers) && parsed.ice_servers.length > 0) {
+            return resolve({
+              ok: true,
+              iceServers: parsed.ice_servers,
+              provider: "twilio",
+            });
+          }
+
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        } catch (err) {
+          logInfo("Twilio", "Failed to parse Twilio token response", err);
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        }
+      });
+    });
+
+    req.on("error", (err) => {
+      logInfo("Twilio", "Twilio token request failed", err);
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
+
 // ==========================================
-// 5. منطق المطابقة (Matchmaking System)
+// 5. منطق المطابقة
 // ==========================================
 
 async function tryMatch(userName) {
   const me = normalizeName(userName);
   if (!me) return;
 
-  if (!acquireMatchLock(me)) {
-    logInfo("Matchmaking", `User ${me} matchmaking request ignored due to active lock.`);
-    return;
-  }
+  if (!acquireMatchLock(me)) return;
 
   try {
-    logInfo("Matchmaking", `User ${me} requested a new match.`);
-
     const mySocket = await getUserSocket(me);
     if (!mySocket) {
-      logInfo("Matchmaking", `User ${me} has no active socket. Search aborted.`);
       await emitToUser(me, "error_msg", { message: "User is not fully connected yet" });
       return;
     }
 
-    if (activeMatches.has(me) || pendingMatchByUser.has(me)) {
-      logInfo("Matchmaking", `User ${me} is already busy, skipping request.`);
-      return;
-    }
+    if (activeMatches.has(me) || pendingMatchByUser.has(me)) return;
 
     removeFromQueue(me);
 
@@ -667,20 +708,13 @@ async function tryMatch(userName) {
     for (let i = 0; i < waitingQueue.length; i++) {
       const candidate = waitingQueue[i];
       if (candidate === me) continue;
-
-      if (matchmakingLocks.has(candidate)) {
-        logInfo("Matchmaking", `Candidate ${candidate} skipped because lock is active.`);
-        continue;
-      }
+      if (matchmakingLocks.has(candidate)) continue;
 
       const alreadyFriends = await Friendship.findOne({
         pairKey: pairKey(me, candidate)
       }).lean();
 
-      if (alreadyFriends) {
-        logInfo("Matchmaking", `Candidate ${candidate} skipped because already friends with ${me}.`);
-        continue;
-      }
+      if (alreadyFriends) continue;
 
       const partnerSocket = await getUserSocket(candidate);
       if (partnerSocket && !activeMatches.has(candidate) && !pendingMatchByUser.has(candidate)) {
@@ -688,7 +722,6 @@ async function tryMatch(userName) {
         waitingQueue.splice(i, 1);
         break;
       } else {
-        logInfo("Matchmaking", `Candidate ${candidate} skipped because no active socket or already busy.`);
         waitingQueue.splice(i, 1);
         i--;
       }
@@ -702,7 +735,6 @@ async function tryMatch(userName) {
 
       await emitToUser(me, "match_found", { partner: partnerProfile, proposalKey: key });
       await emitToUser(partner, "match_found", { partner: myProfile, proposalKey: key });
-      logInfo("Matchmaking", `Proposed match between ${me} and ${partner}`);
     } else {
       if (!waitingQueue.includes(me)) {
         waitingQueue.push(me);
@@ -711,7 +743,6 @@ async function tryMatch(userName) {
         status: "searching",
         message: "Searching for a partner..."
       });
-      logInfo("Matchmaking", `User ${me} added to queue. Queue size: ${waitingQueue.length}`);
     }
   } catch (err) {
     logInfo("Error", `Matchmaking failure for ${me}`, err);
@@ -721,7 +752,7 @@ async function tryMatch(userName) {
 }
 
 // ==========================================
-// 6. أحداث السوكيت (Socket.io Events)
+// 6. أحداث السوكيت
 // ==========================================
 
 io.on("connection", (socket) => {
@@ -756,7 +787,6 @@ io.on("connection", (socket) => {
         { upsert: true, returnDocument: "after" }
       );
 
-      logInfo("User", `Registered & Online: ${userName}`);
       socket.emit("registration_success", { userName, timestamp: new Date() });
       socket.emit("user_ready_for_matchmaking", { success: true, userName, socketId: socket.id });
     } catch (err) {
@@ -787,10 +817,37 @@ io.on("connection", (socket) => {
         success: true,
         user: updatedUser
       });
-      logInfo("User", `Profile updated for: ${me}`);
     } catch (err) {
       logInfo("Error", "Failed to update profile", err);
       socket.emit("error_msg", { message: "Failed to update profile" });
+    }
+  });
+
+  socket.on("get_turn_credentials", async () => {
+    try {
+      const result = await requestTwilioToken();
+
+      socket.emit("turn_credentials", {
+        success: true,
+        iceServers: result.iceServers,
+        provider: result.provider,
+      });
+
+      logInfo(
+        "Twilio",
+        `TURN credentials served to ${socket.data.userName || socket.id}`,
+        {
+          provider: result.provider,
+          count: result.iceServers.length,
+        }
+      );
+    } catch (err) {
+      logInfo("Twilio", "Failed to provide turn credentials", err);
+      socket.emit("turn_credentials", {
+        success: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
     }
   });
 
@@ -798,14 +855,12 @@ io.on("connection", (socket) => {
     try {
       const me = socket.data.userName;
       if (!me) {
-        logInfo("Matchmaking", `Socket ${socket.id} attempted matchmaking before registration.`);
         socket.emit("error_msg", { message: "Please register user before matchmaking" });
         return;
       }
 
       const readiness = await validateUserReadyForMatchmaking(me, socket);
       if (!readiness.ok) {
-        logInfo("Matchmaking", `User ${me} is not ready for matchmaking.`, readiness);
         socket.emit("error_msg", { message: "User is not ready for matchmaking yet" });
         return;
       }
@@ -827,23 +882,12 @@ io.on("connection", (socket) => {
       const hadPendingMatch = pendingMatchByUser.has(cleanMe);
       const hadActiveMatch = activeMatches.has(cleanMe);
 
-      logInfo("Matchmaking", `stop_search requested by ${me}`, {
-        wasInQueue,
-        hadPendingMatch,
-        hadActiveMatch,
-        queueSnapshotBefore: [...waitingQueue]
-      });
-
       if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
         removeFromQueue(me);
 
         socket.emit("search_stopped", {
           success: true,
           mode: "queue_only"
-        });
-
-        logInfo("Matchmaking", `User ${me} stopped queue-only matchmaking.`, {
-          queueSnapshotAfter: [...waitingQueue]
         });
 
         return;
@@ -854,10 +898,6 @@ io.on("connection", (socket) => {
       socket.emit("search_stopped", {
         success: true,
         mode: "relationship_state"
-      });
-
-      logInfo("Matchmaking", `User ${me} stopped matchmaking.`, {
-        queueSnapshotAfter: [...waitingQueue]
       });
     } catch (err) {
       logInfo("Error", "stop_search failed", err);
@@ -893,7 +933,6 @@ io.on("connection", (socket) => {
 
         await emitToUser(proposal.userA, "match_confirmed", { partnerName: proposal.userB });
         await emitToUser(proposal.userB, "match_confirmed", { partnerName: proposal.userA });
-        logInfo("Matchmaking", `Chat started between ${proposal.userA} and ${proposal.userB}`);
       } else {
         await emitToUser(partner, "partner_accepted", { message: "Partner is ready" });
       }
@@ -924,8 +963,6 @@ io.on("connection", (socket) => {
             status: "searching",
             message: "Searching for a new partner..."
           });
-
-          logInfo("Matchmaking", `Pending match cancelled by ${me} with ${other}. Restarting search for both users.`);
 
           tryMatch(other);
         }
@@ -1057,7 +1094,6 @@ io.on("connection", (socket) => {
         await FriendRequest.create({ from: me, to });
         await emitToUser(to, "new_friend_request", { from: me });
         socket.emit("request_sent", { success: true, to });
-        logInfo("Social", `Friend request from ${me} to ${to}`);
       } else {
         socket.emit("error_msg", { message: "Friend request already pending" });
       }
@@ -1094,7 +1130,6 @@ io.on("connection", (socket) => {
         await emitToUser(from, "friend_added_successfully", me);
         await forceRefreshUserSocketState(me);
         await forceRefreshUserSocketState(from);
-        logInfo("Social", `${me} and ${from} are now friends.`);
       } else {
         request.status = "rejected";
         await request.save();
@@ -1166,8 +1201,6 @@ io.on("connection", (socket) => {
 
       await forceRefreshUserSocketState(me);
       await forceRefreshUserSocketState(friendName);
-
-      logInfo("Social", `${me} removed ${friendName} from friends and deleted all related data.`);
     } catch (err) {
       logInfo("Error", "Delete friend failed", err);
       socket.emit("error_msg", { message: "Failed to delete friend" });
@@ -1246,17 +1279,11 @@ io.on("connection", (socket) => {
       });
 
       const plainMsg = msg.toObject ? msg.toObject() : msg;
-
       const delivered = await emitToUser(to, "private_message_received", plainMsg);
 
       socket.emit("pm_sent_success", {
         msgId: msg._id,
         delivered: delivered === true
-      });
-
-      logInfo("PrivateChat", `Message sent from ${me} to ${to}`, {
-        delivered: delivered === true,
-        conversationKey: pairKey(me, to)
       });
     } catch (err) {
       logInfo("Error", "Private message system failure", err);
@@ -1368,8 +1395,6 @@ io.on("connection", (socket) => {
 
       await emitToUser(from, "call_rejected", { by: me });
       await emitToUser(me, "call_ended", { reason: "rejected" });
-
-      logInfo("Call", `Call rejected by ${me} from ${from}`);
     } catch (err) {
       logInfo("Error", "reject_private_call failed", err);
     }
@@ -1379,7 +1404,6 @@ io.on("connection", (socket) => {
     try {
       const me = socket.data.userName;
       if (!me) return;
-
       await clearCallStateForUser(me, "ended");
     } catch (err) {
       logInfo("Error", "end_private_call failed", err);
@@ -1525,7 +1549,7 @@ io.on("connection", (socket) => {
 });
 
 // ==========================================
-// 7. نقاط النهاية (API Endpoints)
+// 7. API
 // ==========================================
 
 app.get("/", (req, res) => {
@@ -1541,7 +1565,9 @@ app.get("/health", async (req, res) => {
       onlineUsers: userToSocket.size,
       queueSize: waitingQueue.length,
       ongoingChats: activeMatches.size / 2,
-      pendingProposals: pendingMatches.size
+      pendingProposals: pendingMatches.size,
+      activeCalls: activeCalls.size / 2,
+      pendingCalls: pendingCalls.size
     },
     system: {
       uptime: process.uptime(),
@@ -1552,7 +1578,7 @@ app.get("/health", async (req, res) => {
 });
 
 // ==========================================
-// 8. تشغيل السيرفر وحماية العمليات
+// 8. تشغيل السيرفر
 // ==========================================
 
 async function startMasterServer() {
@@ -1563,6 +1589,12 @@ async function startMasterServer() {
       serverSelectionTimeoutMS: 10000
     });
     logInfo("System", "Database connection established.");
+
+    if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
+      logInfo("Twilio", "Twilio credentials detected. TURN/STUN via Twilio is enabled.");
+    } else {
+      logInfo("Twilio", "Twilio credentials not found. Using fallback STUN only.");
+    }
 
     server.listen(PORT, "0.0.0.0", () => {
       logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
@@ -1576,7 +1608,7 @@ async function startMasterServer() {
 
 startMasterServer();
 
-process.on("unhandledRejection", (reason, promise) => {
+process.on("unhandledRejection", (reason) => {
   logInfo("Critical", "Unhandled Promise Rejection detected", reason);
 });
 
