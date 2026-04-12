@@ -1220,11 +1220,25 @@ io.on("connection", (socket) => {
 
         await emitToUser(proposal.userA, "match_confirmed", {
           partnerName: profileB?.userName || proposal.userB,
-          partnerId: profileB?.userId || proposal.userB
+          partnerId: profileB?.userId || proposal.userB,
+          age: profileB?.age ?? null,
+          country: profileB?.country ?? "",
+          bio: profileB?.bio ?? "",
+          gender: profileB?.gender ?? "unspecified",
+          profileImage: profileB?.profileImage ?? "",
+          lastSeen: profileB?.lastSeen ?? null,
+          online: profileB?.online === true
         });
         await emitToUser(proposal.userB, "match_confirmed", {
           partnerName: profileA?.userName || proposal.userA,
-          partnerId: profileA?.userId || proposal.userA
+          partnerId: profileA?.userId || proposal.userA,
+          age: profileA?.age ?? null,
+          country: profileA?.country ?? "",
+          bio: profileA?.bio ?? "",
+          gender: profileA?.gender ?? "unspecified",
+          profileImage: profileA?.profileImage ?? "",
+          lastSeen: profileA?.lastSeen ?? null,
+          online: profileA?.online === true
         });
       } else {
         const meProfile = await getFullUserProfile(me);
