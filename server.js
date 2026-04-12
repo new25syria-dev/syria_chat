@@ -1663,6 +1663,40 @@ io.on("connection", (socket) => {
 
       const myProfile = await getFullUserProfile(me);
 
+      const incomingCallPayload = {
+        from: myProfile?.userName || me,
+        fromId: me,
+        friendId: me,
+        friendName: myProfile?.userName || me,
+      };
+
+      if (targetSocket?.id) {
+        userToSocket.set(to, targetSocket.id);
+        await User.findOneAndUpdate(
+          {
+            $or: [
+              { userName: to },
+              { userId: to }
+            ]
+          },
+          {
+            $set: {
+              socketId: targetSocket.id,
+              online: true,
+              lastSeen: new Date()
+            }
+          }
+        );
+      }
+
+      targetSocket.emit("incoming_call", incomingCallPayload);
+      socket.emit("call_ringing", { to });
+
+      logInfo("Call", `Outgoing call from ${me} to ${to}`);
+      logInfo("Call", `incoming_call delivered directly to socket ${targetSocket.id} for ${to}`);
+
+      return;
+
       await emitToUser(to, "incoming_call", {
         from: myProfile?.userName || me,
         fromId: me,
