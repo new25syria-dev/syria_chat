@@ -362,10 +362,14 @@ async function getFullUserProfile(userName) {
   }
 }
 
-async function getUserStatusSummary(userName) {
+async function resolveUserByAnyIdentifier(userName) {
   try {
     const cleanName = normalizeName(userName);
-    const user = await User.findOne({
+    const cleanDisplayName = normalizeDisplayName(userName);
+
+    if (!cleanName && !cleanDisplayName) return null;
+
+    let user = await User.findOne({
       $or: [
         { userName: cleanName },
         { userId: cleanName }
@@ -374,10 +378,42 @@ async function getUserStatusSummary(userName) {
       .select("userName userId displayName online lastSeen")
       .lean();
 
+    if (user) return user;
+
+    if (cleanDisplayName) {
+      user = await User.findOne({
+        displayName: cleanDisplayName
+      })
+        .select("userName userId displayName online lastSeen")
+        .lean();
+    }
+
+    if (user) return user;
+
+    if (cleanDisplayName) {
+      user = await User.findOne({
+        displayName: { $regex: `^${cleanDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" }
+      })
+        .select("userName userId displayName online lastSeen")
+        .lean();
+    }
+
+    return user || null;
+  } catch (err) {
+    logInfo("DB", `Error resolving user by identifier for ${userName}`, err);
+    return null;
+  }
+}
+
+async function getUserStatusSummary(userName) {
+  try {
+    const cleanName = normalizeName(userName);
+    const user = await resolveUserByAnyIdentifier(userName);
+
     if (!user) {
       return {
         user: cleanName,
-        userName: cleanName,
+        userName: normalizeDisplayName(userName) || cleanName,
         online: false,
         lastSeen: null
       };
@@ -396,7 +432,7 @@ async function getUserStatusSummary(userName) {
     logInfo("DB", `Error fetching status summary for ${userName}`, err);
     return {
       user: normalizeName(userName),
-      userName: normalizeName(userName),
+      userName: normalizeDisplayName(userName) || normalizeName(userName),
       online: false,
       lastSeen: null
     };
