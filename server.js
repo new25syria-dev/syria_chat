@@ -214,6 +214,11 @@ function normalizeClientId(value) {
     .replace(/[^a-z0-9_-]/g, "");
 }
 
+function normalizeSecretValue(value) {
+  if (!value) return "";
+  return String(value).trim().replace(/^['"]+|['"]+$/g, "");
+}
+
 function buildStableUserId(clientId, fallbackName) {
   const cleanClientId = normalizeClientId(clientId);
   if (cleanClientId) {
@@ -728,6 +733,115 @@ function getFallbackIceServers() {
 
 function requestTwilioToken() {
   return new Promise((resolve) => {
+    const sidNormalized = normalizeSecretValue(TWILIO_ACCOUNT_SID);
+    const tokenNormalized = normalizeSecretValue(TWILIO_AUTH_TOKEN);
+
+    if (!sidNormalized || !tokenNormalized) {
+      logInfo("Twilio", "Twilio credentials are missing in runtime env", {
+        sidPresent: Boolean(sidNormalized),
+        tokenPresent: Boolean(tokenNormalized)
+      });
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    }
+
+    if (!sidNormalized.startsWith("AC")) {
+      logInfo("Twilio", "TWILIO_ACCOUNT_SID format is invalid for token API", {
+        expectedPrefix: "AC",
+        actualPrefix: sidNormalized.slice(0, 2)
+      });
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    }
+
+    const normalizedPostData = "Ttl=21600";
+    const normalizedOptions = {
+      hostname: "api.twilio.com",
+      port: 443,
+      path: `/2010-04-01/Accounts/${sidNormalized}/Tokens.json`,
+      method: "POST",
+      headers: {
+        "Authorization":
+          "Basic " +
+          Buffer.from(`${sidNormalized}:${tokenNormalized}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(normalizedPostData),
+      },
+    };
+
+    const normalizedReq = https.request(normalizedOptions, (res) => {
+      let body = "";
+
+      res.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+
+      res.on("end", () => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          logInfo("Twilio", "Twilio token request returned non-success status", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        }
+
+        try {
+          const parsed = JSON.parse(body);
+
+          if (Array.isArray(parsed.ice_servers) && parsed.ice_servers.length > 0) {
+            return resolve({
+              ok: true,
+              iceServers: parsed.ice_servers,
+              provider: "twilio",
+            });
+          }
+
+          logInfo("Twilio", "Twilio response has no usable ice_servers", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        } catch (err) {
+          logInfo("Twilio", "Failed to parse Twilio token response", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        }
+      });
+    });
+
+    normalizedReq.on("error", (err) => {
+      logInfo("Twilio", "Twilio token request failed", err);
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    });
+
+    normalizedReq.write(normalizedPostData);
+    normalizedReq.end();
+    return;
+
     if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
       return resolve({
         ok: true,
