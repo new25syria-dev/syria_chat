@@ -611,7 +611,7 @@ async function ensureUserRegistrationState(userName, socketId = null) {
           displayName: cleanName
         }
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     return true;
@@ -1174,7 +1174,7 @@ io.on("connection", (socket) => {
             gender: "unspecified"
           }
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       );
 
       socket.emit("registration_success", {
@@ -1229,7 +1229,7 @@ io.on("connection", (socket) => {
           ]
         },
         { $set: updateFields },
-        { new: true }
+        { returnDocument: "after" }
       ).lean();
 
       socket.emit("profile_updated", {
