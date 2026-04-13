@@ -5,11 +5,6 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const dotenv = require("dotenv");
-const express = require("express");
-const http = require("http");
-const cors = require("cors");
-const mongoose = require("mongoose");
-const { Server } = require("socket.io");
 
 const envCandidates = [
   ".env",
@@ -31,38 +26,15 @@ if (envPath) {
   dotenv.config();
 }
 
-const PORT = Number(process.env.PORT || 10000);
-const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI || "";
-
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
-
-const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || "*")
-  .split(",")
-  .map((v) => v.trim())
-  .filter(Boolean);
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const mongoose = require("mongoose");
+const { Server } = require("socket.io");
 
 const app = express();
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (ALLOWED_ORIGINS.includes("*")) {
-      return callback(null, true);
-    }
-    if (!origin) {
-      return callback(null, true);
-    }
-    if (ALLOWED_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-    return callback(new Error("Not allowed by CORS"));
-  },
-  methods: ["GET", "POST"],
-  credentials: !ALLOWED_ORIGINS.includes("*"),
-};
-
-app.use(cors(corsOptions));
-app.use(express.json({ limit: "2mb" }));
+app.use(cors());
+app.use(express.json());
 
 const server = http.createServer(app);
 
@@ -72,11 +44,17 @@ const io = new Server(server, {
   connectTimeout: 45000,
   allowEIO3: true,
   cors: {
-    origin: ALLOWED_ORIGINS.includes("*") ? true : ALLOWED_ORIGINS,
+    origin: "*",
     methods: ["GET", "POST"],
-    credentials: !ALLOWED_ORIGINS.includes("*"),
+    credentials: true
   },
 });
+
+const PORT = process.env.PORT || 10000;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI;
+
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 
 if (!DATABASE_URL) {
   console.error("FATAL ERROR: DATABASE_URL is not defined in any environment file!");
@@ -98,7 +76,7 @@ const userSchema = new mongoose.Schema(
       sparse: true,
       trim: true,
       index: true,
-      lowercase: true,
+      lowercase: true
     },
     userName: {
       type: String,
@@ -106,7 +84,7 @@ const userSchema = new mongoose.Schema(
       unique: true,
       trim: true,
       index: true,
-      lowercase: true,
+      lowercase: true
     },
     displayName: { type: String, default: "", trim: true, index: true },
     socketId: { type: String, default: null },
@@ -119,7 +97,7 @@ const userSchema = new mongoose.Schema(
     gender: { type: String, default: "unspecified" },
     fcmToken: { type: String, default: "" },
     isBanned: { type: Boolean, default: false },
-    reports: { type: Number, default: 0 },
+    reports: { type: Number, default: 0 }
   },
   { timestamps: true }
 );
@@ -129,7 +107,7 @@ const friendshipSchema = new mongoose.Schema(
     userA: { type: String, required: true, trim: true, index: true },
     userB: { type: String, required: true, trim: true, index: true },
     pairKey: { type: String, required: true, unique: true, index: true },
-    friendsSince: { type: Date, default: Date.now },
+    friendsSince: { type: Date, default: Date.now }
   },
   { timestamps: true }
 );
@@ -142,9 +120,9 @@ const friendRequestSchema = new mongoose.Schema(
       type: String,
       enum: ["pending", "accepted", "rejected"],
       default: "pending",
-      index: true,
+      index: true
     },
-    sentAt: { type: Date, default: Date.now },
+    sentAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
 );
@@ -161,7 +139,7 @@ const privateMessageSchema = new mongoose.Schema(
     conversationKey: { type: String, required: true, index: true },
     readBy: { type: [String], default: [] },
     isDeleted: { type: Boolean, default: false },
-    messageType: { type: String, default: "text" },
+    messageType: { type: String, default: "text" }
   },
   { timestamps: true }
 );
@@ -214,11 +192,7 @@ function logInfo(scope, message, extra = undefined) {
   if (extra === undefined) {
     console.log(`${prefix} ${message}`);
   } else {
-    try {
-      console.log(`${prefix} ${message}`, JSON.stringify(extra, null, 2));
-    } catch {
-      console.log(`${prefix} ${message}`, extra);
-    }
+    console.log(`${prefix} ${message}`, JSON.stringify(extra, null, 2));
   }
 }
 
@@ -245,40 +219,12 @@ function normalizeSecretValue(value) {
   return String(value).trim().replace(/^['"]+|['"]+$/g, "");
 }
 
-function sanitizeText(value, maxLength = 2000) {
-  if (value === undefined || value === null) return "";
-  return String(value).trim().slice(0, maxLength);
-}
-
-function sanitizeUrl(value, maxLength = 4000) {
-  if (!value) return "";
-  return String(value).trim().slice(0, maxLength);
-}
-
-function sanitizeOptionalString(value, maxLength = 300) {
-  if (value === undefined || value === null) return "";
-  return String(value).trim().slice(0, maxLength);
-}
-
-function sanitizeAge(value) {
-  if (value === undefined || value === null || value === "") return null;
-  const age = Number(value);
-  if (!Number.isFinite(age)) return null;
-  if (age < 0 || age > 120) return null;
-  return Math.floor(age);
-}
-
 function buildStableUserId(clientId, fallbackName) {
   const cleanClientId = normalizeClientId(clientId);
   if (cleanClientId) {
     return normalizeName(`uid_${cleanClientId}`);
   }
-
-  const cleanFallback = normalizeName(fallbackName);
-  if (!cleanFallback) return "";
-
-  // احتياطي فقط للمحافظة على التوافق مع التطبيق الحالي
-  return cleanFallback;
+  return normalizeName(fallbackName);
 }
 
 function parseRegistrationPayload(rawPayload) {
@@ -325,8 +271,6 @@ function pairKey(a, b) {
 
 function removeFromQueue(userName) {
   const cleanName = normalizeName(userName);
-  if (!cleanName) return false;
-
   let removed = false;
   for (let i = waitingQueue.length - 1; i >= 0; i--) {
     if (waitingQueue[i] === cleanName) {
@@ -334,43 +278,14 @@ function removeFromQueue(userName) {
       removed = true;
     }
   }
-
   if (removed) {
     logInfo("Queue", `User ${cleanName} removed from waiting list.`);
   }
-
-  return removed;
-}
-
-function isUserInQueue(userName) {
-  const cleanName = normalizeName(userName);
-  return waitingQueue.includes(cleanName);
-}
-
-function addToQueue(userName) {
-  const cleanName = normalizeName(userName);
-  if (!cleanName) return false;
-  if (waitingQueue.includes(cleanName)) return false;
-  waitingQueue.push(cleanName);
-  return true;
-}
-
-async function getUserDocByAnyIdentifier(userName) {
-  const cleanName = normalizeName(userName);
-  if (!cleanName) return null;
-
-  return User.findOne({
-    $or: [
-      { userName: cleanName },
-      { userId: cleanName }
-    ]
-  }).lean();
 }
 
 async function getUserSocket(userName) {
   try {
     const cleanName = normalizeName(userName);
-    if (!cleanName) return null;
 
     const directSocketId = userToSocket.get(cleanName);
     if (directSocketId) {
@@ -385,7 +300,6 @@ async function getUserSocket(userName) {
         { userId: cleanName }
       ]
     }).select("socketId userName userId").lean();
-
     if (!user || !user.socketId) return null;
 
     const socket = io.sockets.sockets.get(user.socketId);
@@ -420,15 +334,12 @@ async function emitToUser(userName, event, payload) {
 async function getFullUserProfile(userName) {
   try {
     const cleanName = normalizeName(userName);
-    if (!cleanName) return null;
-
     const user = await User.findOne({
       $or: [
         { userName: cleanName },
         { userId: cleanName }
       ]
     }).lean();
-
     if (!user) return null;
 
     const canonicalId = publicUserId(user);
@@ -481,10 +392,7 @@ async function resolveUserByAnyIdentifier(userName) {
 
     if (cleanDisplayName) {
       user = await User.findOne({
-        displayName: {
-          $regex: `^${cleanDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-          $options: "i"
-        }
+        displayName: { $regex: `^${cleanDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" }
       })
         .select("userName userId displayName online lastSeen")
         .lean();
@@ -596,7 +504,7 @@ async function ensureUserRegistrationState(userName, socketId = null) {
           displayName: cleanName
         }
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     return true;
@@ -617,15 +525,11 @@ async function validateUserReadyForMatchmaking(userName, socket) {
         { userName: me },
         { userId: me }
       ]
-    }).select("socketId online isBanned").lean();
+    }).select("socketId online").lean();
 
     if (!dbUser) {
       await ensureUserRegistrationState(me, socket.id);
       return { ok: true };
-    }
-
-    if (dbUser.isBanned === true) {
-      return { ok: false, reason: "banned" };
     }
 
     if (dbUser.socketId !== socket.id || dbUser.online !== true) {
@@ -640,9 +544,7 @@ async function validateUserReadyForMatchmaking(userName, socket) {
 }
 
 function createPendingMatchEntry(userA, userB) {
-  const a = normalizeName(userA);
-  const b = normalizeName(userB);
-  const key = pairKey(a, b);
+  const key = pairKey(userA, userB);
 
   const timeoutId = setTimeout(async () => {
     try {
@@ -656,23 +558,23 @@ function createPendingMatchEntry(userA, userB) {
       await emitToUser(proposal.userA, "match_timeout", { reason: "no_response" });
       await emitToUser(proposal.userB, "match_timeout", { reason: "no_response" });
 
-      await tryMatch(proposal.userA);
-      await tryMatch(proposal.userB);
+      tryMatch(proposal.userA);
+      tryMatch(proposal.userB);
     } catch (err) {
       logInfo("Error", "Pending match timeout cleanup failed", err);
     }
   }, MATCH_PROPOSAL_TTL);
 
   pendingMatches.set(key, {
-    userA: a,
-    userB: b,
+    userA,
+    userB,
     acceptedBy: new Set(),
     createdAt: Date.now(),
     timeoutId
   });
 
-  pendingMatchByUser.set(a, key);
-  pendingMatchByUser.set(b, key);
+  pendingMatchByUser.set(userA, key);
+  pendingMatchByUser.set(userB, key);
 
   return key;
 }
@@ -702,14 +604,14 @@ function createPendingCall(caller, callee) {
   }, CALL_RING_TIMEOUT);
 
   pendingCalls.set(key, {
-    caller: normalizeName(caller),
-    callee: normalizeName(callee),
+    caller,
+    callee,
     timeoutId,
     createdAt: Date.now(),
   });
 
-  pendingCallByUser.set(normalizeName(caller), key);
-  pendingCallByUser.set(normalizeName(callee), key);
+  pendingCallByUser.set(caller, key);
+  pendingCallByUser.set(callee, key);
 
   return key;
 }
@@ -723,7 +625,6 @@ async function clearCallStateForUser(userName, reason = "ended") {
     activeCalls.delete(me);
     activeCalls.delete(activePartner);
     await emitToUser(activePartner, "call_ended", { reason });
-    await emitToUser(me, "call_ended", { reason });
   }
 
   const pendingKey = pendingCallByUser.get(me);
@@ -741,7 +642,6 @@ async function clearCallStateForUser(userName, reason = "ended") {
       pendingCallByUser.delete(pending.callee);
 
       await emitToUser(other, "call_ended", { reason });
-      await emitToUser(me, "call_ended", { reason });
     } else {
       pendingCallByUser.delete(me);
     }
@@ -790,7 +690,7 @@ async function clearUserBusyState(userName, reason = "state_cleared") {
           status: "searching",
           message: "Searching for a new partner..."
         });
-        await tryMatch(other);
+        tryMatch(other);
       } else {
         await emitToUser(other, "match_cancelled", { reason });
       }
@@ -896,22 +796,22 @@ function requestTwilioToken() {
       });
     }
 
-    const postData = "Ttl=21600";
-    const options = {
+    const normalizedPostData = "Ttl=21600";
+    const normalizedOptions = {
       hostname: "api.twilio.com",
       port: 443,
       path: `/2010-04-01/Accounts/${sidNormalized}/Tokens.json`,
       method: "POST",
       headers: {
-        Authorization:
+        "Authorization":
           "Basic " +
           Buffer.from(`${sidNormalized}:${tokenNormalized}`).toString("base64"),
         "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(postData),
+        "Content-Length": Buffer.byteLength(normalizedPostData),
       },
     };
 
-    const req = https.request(options, (res) => {
+    const normalizedReq = https.request(normalizedOptions, (res) => {
       let body = "";
 
       res.on("data", (chunk) => {
@@ -946,7 +846,6 @@ function requestTwilioToken() {
             statusCode: res.statusCode,
             bodyPreview: body.slice(0, 500)
           });
-
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
@@ -966,7 +865,7 @@ function requestTwilioToken() {
       });
     });
 
-    req.on("error", (err) => {
+    normalizedReq.on("error", (err) => {
       logInfo("Twilio", "Twilio token request failed", err);
       return resolve({
         ok: true,
@@ -975,8 +874,8 @@ function requestTwilioToken() {
       });
     });
 
-    req.write(postData);
-    req.end();
+    normalizedReq.write(normalizedPostData);
+    normalizedReq.end();
   });
 }
 
@@ -992,8 +891,6 @@ async function tryMatch(userName) {
     return;
   }
 
-  let lockedPartner = null;
-
   try {
     const mySocket = await getUserSocket(me);
     if (!mySocket) {
@@ -1008,49 +905,26 @@ async function tryMatch(userName) {
     removeFromQueue(me);
 
     let partner = null;
-
     for (let i = 0; i < waitingQueue.length; i++) {
-      const candidate = normalizeName(waitingQueue[i]);
-      if (!candidate || candidate === me) continue;
+      const candidate = waitingQueue[i];
+      if (candidate === me) continue;
 
-      if (!acquireMatchLock(candidate)) {
-        continue;
-      }
+      if (matchmakingLocks.has(candidate)) continue;
 
-      lockedPartner = candidate;
+      const alreadyFriends = await Friendship.findOne({
+        pairKey: pairKey(me, candidate)
+      }).lean();
 
-      try {
-        const alreadyFriends = await Friendship.findOne({
-          pairKey: pairKey(me, candidate)
-        }).lean();
+      if (alreadyFriends) continue;
 
-        if (alreadyFriends) {
-          releaseMatchLock(candidate);
-          lockedPartner = null;
-          continue;
-        }
-
-        const partnerSocket = await getUserSocket(candidate);
-
-        if (
-          partnerSocket &&
-          !activeMatches.has(candidate) &&
-          !pendingMatchByUser.has(candidate)
-        ) {
-          partner = candidate;
-          waitingQueue.splice(i, 1);
-          break;
-        }
-
+      const partnerSocket = await getUserSocket(candidate);
+      if (partnerSocket && !activeMatches.has(candidate) && !pendingMatchByUser.has(candidate)) {
+        partner = candidate;
+        waitingQueue.splice(i, 1);
+        break;
+      } else {
         waitingQueue.splice(i, 1);
         i--;
-
-        releaseMatchLock(candidate);
-        lockedPartner = null;
-      } catch (candidateErr) {
-        logInfo("Matchmaking", `Candidate validation failed for ${candidate}`, candidateErr);
-        releaseMatchLock(candidate);
-        lockedPartner = null;
       }
     }
 
@@ -1062,13 +936,10 @@ async function tryMatch(userName) {
 
       await emitToUser(me, "match_found", { partner: partnerProfile, proposalKey: key });
       await emitToUser(partner, "match_found", { partner: myProfile, proposalKey: key });
-
-      if (lockedPartner === partner) {
-        releaseMatchLock(partner);
-        lockedPartner = null;
-      }
     } else {
-      addToQueue(me);
+      if (!waitingQueue.includes(me)) {
+        waitingQueue.push(me);
+      }
       await emitToUser(me, "waiting_in_queue", {
         status: "searching",
         message: "Searching for a partner..."
@@ -1077,9 +948,6 @@ async function tryMatch(userName) {
   } catch (err) {
     logInfo("Error", `Matchmaking failure for ${me}`, err);
   } finally {
-    if (lockedPartner) {
-      releaseMatchLock(lockedPartner);
-    }
     releaseMatchLock(me);
   }
 }
@@ -1094,31 +962,18 @@ io.on("connection", (socket) => {
   socket.on("register_user", async (rawName) => {
     try {
       const registration = parseRegistrationPayload(rawName);
-      const displayName = sanitizeOptionalString(registration.displayName, 60);
-
-      if (!displayName) {
-        socket.emit("error_msg", { message: "Display name is required" });
-        return;
-      }
+      const displayName = registration.displayName;
+      if (!displayName) return;
 
       const userName = buildStableUserId(registration.clientId, displayName);
-      if (!userName) {
-        socket.emit("error_msg", { message: "Invalid user identity" });
-        return;
-      }
+      if (!userName) return;
 
       const existingUser = await User.findOne({
         $or: [
           { userName },
           { userId: userName }
         ]
-      }).select("socketId isBanned").lean();
-
-      if (existingUser?.isBanned === true) {
-        socket.emit("error_msg", { message: "This account is banned" });
-        return;
-      }
-
+      }).select("socketId").lean();
       if (existingUser?.socketId && existingUser.socketId !== socket.id) {
         const oldSocket = io.sockets.sockets.get(existingUser.socketId);
         if (oldSocket) {
@@ -1131,7 +986,6 @@ io.on("connection", (socket) => {
       socket.data.userName = userName;
       socket.data.userId = userName;
       socket.data.displayName = displayName;
-
       socketToUser.set(socket.id, userName);
       userToSocket.set(userName, socket.id);
 
@@ -1159,7 +1013,7 @@ io.on("connection", (socket) => {
             gender: "unspecified"
           }
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       );
 
       socket.emit("registration_success", {
@@ -1169,7 +1023,6 @@ io.on("connection", (socket) => {
         canonicalUserName: userName,
         timestamp: new Date()
       });
-
       socket.emit("user_ready_for_matchmaking", {
         success: true,
         userName: displayName,
@@ -1187,20 +1040,18 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) return;
 
-      const requestedDisplayName = sanitizeOptionalString(normalizeDisplayName(data?.userName), 60);
-
+      const requestedDisplayName = normalizeDisplayName(data?.userName);
       const updateFields = {
-        profileImage: sanitizeUrl(data?.profileImage, 4000),
-        country: sanitizeOptionalString(data?.country, 100),
-        age: sanitizeAge(data?.age),
-        bio: sanitizeOptionalString(data?.bio, 500),
-        gender: sanitizeOptionalString(data?.gender || "unspecified", 40) || "unspecified",
+        profileImage: data?.profileImage ?? "",
+        country: data?.country ?? "",
+        age: data?.age ?? null,
+        bio: data?.bio ?? "",
+        gender: data?.gender ?? "unspecified",
         lastSeen: new Date(),
       };
 
       if (requestedDisplayName) {
         updateFields.displayName = requestedDisplayName;
-        socket.data.displayName = requestedDisplayName;
       }
 
       const updatedUser = await User.findOneAndUpdate(
@@ -1210,9 +1061,9 @@ io.on("connection", (socket) => {
             { userId: me }
           ]
         },
-        { $set: updateFields },
-        { new: true }
-      ).lean();
+        updateFields,
+        { returnDocument: "after" }
+      );
 
       socket.emit("profile_updated", {
         success: true,
@@ -1258,11 +1109,7 @@ io.on("connection", (socket) => {
 
       const readiness = await validateUserReadyForMatchmaking(me, socket);
       if (!readiness.ok) {
-        const msg =
-          readiness.reason === "banned"
-            ? "This account is banned"
-            : "User is not ready for matchmaking yet";
-        socket.emit("error_msg", { message: msg });
+        socket.emit("error_msg", { message: "User is not ready for matchmaking yet" });
         return;
       }
 
@@ -1279,7 +1126,7 @@ io.on("connection", (socket) => {
       if (!me) return;
 
       const cleanMe = normalizeName(me);
-      const wasInQueue = isUserInQueue(cleanMe);
+      const wasInQueue = waitingQueue.includes(cleanMe);
       const hadPendingMatch = pendingMatchByUser.has(cleanMe);
       const hadActiveMatch = activeMatches.has(cleanMe);
 
@@ -1346,7 +1193,6 @@ io.on("connection", (socket) => {
           lastSeen: profileB?.lastSeen ?? null,
           online: profileB?.online === true
         });
-
         await emitToUser(proposal.userB, "match_confirmed", {
           partnerName: profileA?.userName || proposal.userA,
           partnerId: profileA?.userId || proposal.userA,
@@ -1394,11 +1240,10 @@ io.on("connection", (socket) => {
             message: "Searching for a new partner..."
           });
 
-          await tryMatch(other);
+          tryMatch(other);
         }
 
-        await tryMatch(me);
-        return;
+        return tryMatch(me);
       }
 
       const partner = activeMatches.get(me);
@@ -1412,10 +1257,10 @@ io.on("connection", (socket) => {
           message: "Searching for a new partner..."
         });
 
-        await tryMatch(partner);
+        tryMatch(partner);
       }
 
-      await tryMatch(me);
+      tryMatch(me);
     } catch (err) {
       logInfo("Error", "skip_partner failed", err);
     }
@@ -1424,8 +1269,7 @@ io.on("connection", (socket) => {
   socket.on("message", async (msgContent) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
-    const cleanText = sanitizeText(msgContent, 2000);
-
+    const cleanText = String(msgContent || "").trim();
     if (!partner || !cleanText) return;
 
     try {
@@ -1448,16 +1292,14 @@ io.on("connection", (socket) => {
   socket.on("send_image", async (imgData) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
-    const imageUrl = sanitizeUrl(imgData?.url, 4000);
-
-    if (!partner || !imageUrl) return;
+    if (!partner || !imgData?.url) return;
 
     try {
       const data = {
         from: me,
         to: partner,
         type: "image",
-        image: imageUrl,
+        image: imgData.url,
         time: new Date(),
         conversationKey: pairKey(me, partner)
       };
@@ -1468,50 +1310,36 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("typing", async (isTyping) => {
-    try {
-      const me = socket.data.userName;
-      const partner = activeMatches.get(me);
-      if (!partner) return;
+  socket.on("typing", (isTyping) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    if (!partner) return;
 
-      const key = `${pairKey(me, partner)}__${me}`;
-      const oldTimeout = userTypingTimeout.get(key);
+    const key = pairKey(me, partner);
+    const oldTimeout = userTypingTimeout.get(key);
+    if (oldTimeout) {
+      clearTimeout(oldTimeout);
+    }
 
-      if (oldTimeout) {
-        clearTimeout(oldTimeout);
-      }
+    emitToUser(partner, "partner_typing", { isTyping: Boolean(isTyping) });
 
-      await emitToUser(partner, "partner_typing", {
-        from: me,
-        isTyping: Boolean(isTyping)
-      });
-
-      if (isTyping) {
-        const timeoutId = setTimeout(() => {
-          emitToUser(partner, "partner_typing", {
-            from: me,
-            isTyping: false
-          });
-          userTypingTimeout.delete(key);
-        }, 2500);
-
-        userTypingTimeout.set(key, timeoutId);
-      } else {
+    if (isTyping) {
+      const timeoutId = setTimeout(() => {
+        emitToUser(partner, "partner_typing", { isTyping: false });
         userTypingTimeout.delete(key);
-      }
-    } catch (err) {
-      logInfo("Error", "typing event failed", err);
+      }, 2500);
+      userTypingTimeout.set(key, timeoutId);
+    } else {
+      userTypingTimeout.delete(key);
     }
   });
 
   socket.on("send_friend_request", async (targetName) => {
     const me = socket.data.userName;
     let to = extractTargetName(targetName);
-
     if (!to) {
       to = activeMatches.get(me) || "";
     }
-
     if (!me || !to || me === to) return;
 
     try {
@@ -1521,7 +1349,6 @@ io.on("connection", (socket) => {
           { userId: to }
         ]
       }).select("_id userName userId displayName").lean();
-
       if (!targetUser) {
         return socket.emit("error_msg", { message: "Target user does not exist" });
       }
@@ -1600,17 +1427,14 @@ io.on("connection", (socket) => {
           by: myProfile?.userName || me,
           byId: me
         });
-
         await emitToUser(me, "friend_added_successfully", {
           userName: fromProfile?.userName || from,
           userId: from
         });
-
         await emitToUser(from, "friend_added_successfully", {
           userName: myProfile?.userName || me,
           userId: me
         });
-
         await forceRefreshUserSocketState(me);
         await forceRefreshUserSocketState(from);
       } else {
@@ -1755,8 +1579,7 @@ io.on("connection", (socket) => {
   socket.on("private_message", async (data) => {
     const me = socket.data.userName;
     const to = extractTargetName(data);
-    const cleanText = sanitizeText(data?.text, 2000);
-
+    const cleanText = String(data?.text || "").trim();
     if (!me || !to || !cleanText) return;
 
     try {
@@ -1777,12 +1600,10 @@ io.on("connection", (socket) => {
       const plainMsg = msg.toObject ? msg.toObject() : msg;
       const myProfile = await getFullUserProfile(me);
       const targetProfile = await getFullUserProfile(to);
-
       plainMsg.fromId = me;
       plainMsg.toId = to;
       plainMsg.fromName = myProfile?.userName || me;
       plainMsg.toName = targetProfile?.userName || to;
-
       const delivered = await emitToUser(to, "private_message_received", plainMsg);
 
       socket.emit("pm_sent_success", {
@@ -2046,7 +1867,7 @@ io.on("connection", (socket) => {
 
       const typingKeysToDelete = [];
       for (const [typingKey, timeoutId] of userTypingTimeout.entries()) {
-        if (typingKey.includes(`__${me}`) || typingKey.includes(pairKey(me, ""))) {
+        if (typingKey.includes(me)) {
           clearTimeout(timeoutId);
           typingKeysToDelete.push(typingKey);
         }
@@ -2058,25 +1879,16 @@ io.on("connection", (socket) => {
       const currentSocketId = userToSocket.get(me);
       if (currentSocketId === socket.id) {
         userToSocket.delete(me);
-
         await User.findOneAndUpdate(
+          { userName: me },
           {
-            $or: [
-              { userName: me },
-              { userId: me }
-            ]
-          },
-          {
-            $set: {
-              online: false,
-              lastSeen: new Date(),
-              socketId: null
-            }
+            online: false,
+            lastSeen: new Date(),
+            socketId: null
           }
         );
       }
     }
-
     socketToUser.delete(socket.id);
   });
 });
@@ -2091,7 +1903,6 @@ app.get("/", (req, res) => {
 
 app.get("/health", async (req, res) => {
   const dbStatus = mongoose.connection.readyState;
-
   res.json({
     status: "active",
     database: dbStatus === 1 ? "connected" : "error",
@@ -2105,7 +1916,7 @@ app.get("/health", async (req, res) => {
     },
     system: {
       uptime: process.uptime(),
-      memory: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`,
+      memory: process.memoryUsage().heapUsed / 1024 / 1024 + " MB",
       platform: process.platform
     }
   });
@@ -2118,12 +1929,10 @@ app.get("/health", async (req, res) => {
 async function startMasterServer() {
   try {
     logInfo("System", "Initializing database connection...");
-
     await mongoose.connect(DATABASE_URL, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000
     });
-
     logInfo("System", "Database connection established.");
 
     server.listen(PORT, "0.0.0.0", () => {
