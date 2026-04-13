@@ -362,10 +362,14 @@ async function getFullUserProfile(userName) {
   }
 }
 
-async function getUserStatusSummary(userName) {
+async function resolveUserByAnyIdentifier(userName) {
   try {
     const cleanName = normalizeName(userName);
-    const user = await User.findOne({
+    const cleanDisplayName = normalizeDisplayName(userName);
+
+    if (!cleanName && !cleanDisplayName) return null;
+
+    let user = await User.findOne({
       $or: [
         { userName: cleanName },
         { userId: cleanName }
@@ -374,10 +378,42 @@ async function getUserStatusSummary(userName) {
       .select("userName userId displayName online lastSeen")
       .lean();
 
+    if (user) return user;
+
+    if (cleanDisplayName) {
+      user = await User.findOne({
+        displayName: cleanDisplayName
+      })
+        .select("userName userId displayName online lastSeen")
+        .lean();
+    }
+
+    if (user) return user;
+
+    if (cleanDisplayName) {
+      user = await User.findOne({
+        displayName: { $regex: `^${cleanDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" }
+      })
+        .select("userName userId displayName online lastSeen")
+        .lean();
+    }
+
+    return user || null;
+  } catch (err) {
+    logInfo("DB", `Error resolving user by identifier for ${userName}`, err);
+    return null;
+  }
+}
+
+async function getUserStatusSummary(userName) {
+  try {
+    const cleanName = normalizeName(userName);
+    const user = await resolveUserByAnyIdentifier(userName);
+
     if (!user) {
       return {
         user: cleanName,
-        userName: cleanName,
+        userName: normalizeDisplayName(userName) || cleanName,
         online: false,
         lastSeen: null
       };
@@ -396,7 +432,7 @@ async function getUserStatusSummary(userName) {
     logInfo("DB", `Error fetching status summary for ${userName}`, err);
     return {
       user: normalizeName(userName),
-      userName: normalizeName(userName),
+      userName: normalizeDisplayName(userName) || normalizeName(userName),
       online: false,
       lastSeen: null
     };
@@ -733,6 +769,115 @@ function getFallbackIceServers() {
 
 function requestTwilioToken() {
   return new Promise((resolve) => {
+    const sidNormalized = normalizeSecretValue(TWILIO_ACCOUNT_SID);
+    const tokenNormalized = normalizeSecretValue(TWILIO_AUTH_TOKEN);
+
+    if (!sidNormalized || !tokenNormalized) {
+      logInfo("Twilio", "Twilio credentials are missing in runtime env", {
+        sidPresent: Boolean(sidNormalized),
+        tokenPresent: Boolean(tokenNormalized)
+      });
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    }
+
+    if (!sidNormalized.startsWith("AC")) {
+      logInfo("Twilio", "TWILIO_ACCOUNT_SID format is invalid for token API", {
+        expectedPrefix: "AC",
+        actualPrefix: sidNormalized.slice(0, 2)
+      });
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    }
+
+    const normalizedPostData = "Ttl=21600";
+    const normalizedOptions = {
+      hostname: "api.twilio.com",
+      port: 443,
+      path: `/2010-04-01/Accounts/${sidNormalized}/Tokens.json`,
+      method: "POST",
+      headers: {
+        "Authorization":
+          "Basic " +
+          Buffer.from(`${sidNormalized}:${tokenNormalized}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(normalizedPostData),
+      },
+    };
+
+    const normalizedReq = https.request(normalizedOptions, (res) => {
+      let body = "";
+
+      res.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+
+      res.on("end", () => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          logInfo("Twilio", "Twilio token request returned non-success status", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        }
+
+        try {
+          const parsed = JSON.parse(body);
+
+          if (Array.isArray(parsed.ice_servers) && parsed.ice_servers.length > 0) {
+            return resolve({
+              ok: true,
+              iceServers: parsed.ice_servers,
+              provider: "twilio",
+            });
+          }
+
+          logInfo("Twilio", "Twilio response has no usable ice_servers", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        } catch (err) {
+          logInfo("Twilio", "Failed to parse Twilio token response", {
+            statusCode: res.statusCode,
+            bodyPreview: body.slice(0, 500)
+          });
+          return resolve({
+            ok: true,
+            iceServers: getFallbackIceServers(),
+            provider: "fallback_stun",
+          });
+        }
+      });
+    });
+
+    normalizedReq.on("error", (err) => {
+      logInfo("Twilio", "Twilio token request failed", err);
+      return resolve({
+        ok: true,
+        iceServers: getFallbackIceServers(),
+        provider: "fallback_stun",
+      });
+    });
+
+    normalizedReq.write(normalizedPostData);
+    normalizedReq.end();
+    return;
+
     if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
       return resolve({
         ok: true,
@@ -1111,11 +1256,25 @@ io.on("connection", (socket) => {
 
         await emitToUser(proposal.userA, "match_confirmed", {
           partnerName: profileB?.userName || proposal.userB,
-          partnerId: profileB?.userId || proposal.userB
+          partnerId: profileB?.userId || proposal.userB,
+          age: profileB?.age ?? null,
+          country: profileB?.country ?? "",
+          bio: profileB?.bio ?? "",
+          gender: profileB?.gender ?? "unspecified",
+          profileImage: profileB?.profileImage ?? "",
+          lastSeen: profileB?.lastSeen ?? null,
+          online: profileB?.online === true
         });
         await emitToUser(proposal.userB, "match_confirmed", {
           partnerName: profileA?.userName || proposal.userA,
-          partnerId: profileA?.userId || proposal.userA
+          partnerId: profileA?.userId || proposal.userA,
+          age: profileA?.age ?? null,
+          country: profileA?.country ?? "",
+          bio: profileA?.bio ?? "",
+          gender: profileA?.gender ?? "unspecified",
+          profileImage: profileA?.profileImage ?? "",
+          lastSeen: profileA?.lastSeen ?? null,
+          online: profileA?.online === true
         });
       } else {
         const meProfile = await getFullUserProfile(me);
@@ -1553,6 +1712,40 @@ io.on("connection", (socket) => {
       createPendingCall(me, to);
 
       const myProfile = await getFullUserProfile(me);
+
+      const incomingCallPayload = {
+        from: myProfile?.userName || me,
+        fromId: me,
+        friendId: me,
+        friendName: myProfile?.userName || me,
+      };
+
+      if (targetSocket?.id) {
+        userToSocket.set(to, targetSocket.id);
+        await User.findOneAndUpdate(
+          {
+            $or: [
+              { userName: to },
+              { userId: to }
+            ]
+          },
+          {
+            $set: {
+              socketId: targetSocket.id,
+              online: true,
+              lastSeen: new Date()
+            }
+          }
+        );
+      }
+
+      targetSocket.emit("incoming_call", incomingCallPayload);
+      socket.emit("call_ringing", { to });
+
+      logInfo("Call", `Outgoing call from ${me} to ${to}`);
+      logInfo("Call", `incoming_call delivered directly to socket ${targetSocket.id} for ${to}`);
+
+      return;
 
       await emitToUser(to, "incoming_call", {
         from: myProfile?.userName || me,
