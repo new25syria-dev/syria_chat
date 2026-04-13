@@ -11,17 +11,25 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 
-const io = new Server(server, {
-  pingTimeout: 12000,
-  pingInterval: 5000,
-  connectTimeout: 45000,
-  allowEIO3: true,
-  cors: {
-    origin: ALLOWED_ORIGINS.includes("*") ? true : ALLOWED_ORIGINS,
-    methods: ["GET", "POST"],
-    credentials: !ALLOWED_ORIGINS.includes("*"),
-  },
-});
+const envCandidates = [
+  ".env",
+  ".nenv",
+  ".env.txt",
+  "config.env",
+  "vars.env",
+  ".env.production",
+  ".env.development"
+];
+
+const envPath = envCandidates
+  .map((name) => path.join(__dirname, name))
+  .find((candidate) => fs.existsSync(candidate));
+
+if (envPath) {
+  dotenv.config({ path: envPath });
+} else {
+  dotenv.config();
+}
 
 const PORT = Number(process.env.PORT || 10000);
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI || "";
@@ -59,8 +67,8 @@ app.use(express.json({ limit: "2mb" }));
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 15000,
+  pingInterval: 8000,
   connectTimeout: 45000,
   allowEIO3: true,
   cors: {
@@ -597,6 +605,34 @@ async function notifyFriendsStatusChanged(userName) {
     }
   } catch (err) {
     logInfo("Status", `Failed to notify friends status change for ${userName}`, err);
+  }
+}
+
+async function getFriendIdsForUser(userName) {
+  try {
+    const me = normalizeName(userName);
+    if (!me) return [];
+
+    const friendships = await Friendship.find({
+      $or: [
+        { userA: me },
+        { userB: me }
+      ]
+    })
+      .select("userA userB")
+      .lean();
+
+    const ids = [];
+
+    for (const item of friendships) {
+      const friend = item.userA === me ? item.userB : item.userA;
+      if (friend) ids.push(friend);
+    }
+
+    return [...new Set(ids)];
+  } catch (err) {
+    logInfo("DB", `Failed to get friend ids for ${userName}`, err);
+    return [];
   }
 }
 
@@ -1710,24 +1746,18 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("get_friends_status", async (friends) => {
+  socket.on("get_friends_status", async () => {
     try {
       const me = socket.data.userName;
       if (!me) return;
 
-      const list = Array.isArray(friends) ? friends : [];
-      const seen = new Set();
+      const friendIds = await getFriendIdsForUser(me);
 
-      for (const item of list) {
-        const friendName = extractTargetName(item);
-        if (!friendName) continue;
-        if (seen.has(friendName)) continue;
-        seen.add(friendName);
-
-        const status = await getUserStatusSummary(friendName);
+      for (const friendId of friendIds) {
+        const status = await getUserStatusSummary(friendId);
 
         socket.emit("update_status", {
-          user: status.user,
+          user: status.userId,
           userId: status.userId,
           friendId: status.friendId,
           userName: status.userName,
@@ -1738,6 +1768,32 @@ io.on("connection", (socket) => {
       }
     } catch (err) {
       logInfo("Error", "Failed to get friends status", err);
+      socket.emit("error_msg", { message: "Failed to get friends status" });
+    }
+  });
+
+  socket.on("get_my_friends_status", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const friendIds = await getFriendIdsForUser(me);
+
+      for (const friendId of friendIds) {
+        const status = await getUserStatusSummary(friendId);
+
+        socket.emit("update_status", {
+          user: status.userId,
+          userId: status.userId,
+          friendId: status.friendId,
+          userName: status.userName,
+          displayName: status.displayName,
+          online: status.online,
+          lastSeen: status.lastSeen
+        });
+      }
+    } catch (err) {
+      logInfo("Error", "Failed to get_my_friends_status", err);
       socket.emit("error_msg", { message: "Failed to get friends status" });
     }
   });
