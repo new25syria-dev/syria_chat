@@ -362,14 +362,10 @@ async function getFullUserProfile(userName) {
   }
 }
 
-async function resolveUserByAnyIdentifier(userName) {
+async function getUserStatusSummary(userName) {
   try {
     const cleanName = normalizeName(userName);
-    const cleanDisplayName = normalizeDisplayName(userName);
-
-    if (!cleanName && !cleanDisplayName) return null;
-
-    let user = await User.findOne({
+    const user = await User.findOne({
       $or: [
         { userName: cleanName },
         { userId: cleanName }
@@ -378,42 +374,10 @@ async function resolveUserByAnyIdentifier(userName) {
       .select("userName userId displayName online lastSeen")
       .lean();
 
-    if (user) return user;
-
-    if (cleanDisplayName) {
-      user = await User.findOne({
-        displayName: cleanDisplayName
-      })
-        .select("userName userId displayName online lastSeen")
-        .lean();
-    }
-
-    if (user) return user;
-
-    if (cleanDisplayName) {
-      user = await User.findOne({
-        displayName: { $regex: `^${cleanDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" }
-      })
-        .select("userName userId displayName online lastSeen")
-        .lean();
-    }
-
-    return user || null;
-  } catch (err) {
-    logInfo("DB", `Error resolving user by identifier for ${userName}`, err);
-    return null;
-  }
-}
-
-async function getUserStatusSummary(userName) {
-  try {
-    const cleanName = normalizeName(userName);
-    const user = await resolveUserByAnyIdentifier(userName);
-
     if (!user) {
       return {
         user: cleanName,
-        userName: normalizeDisplayName(userName) || cleanName,
+        userName: cleanName,
         online: false,
         lastSeen: null
       };
@@ -432,7 +396,7 @@ async function getUserStatusSummary(userName) {
     logInfo("DB", `Error fetching status summary for ${userName}`, err);
     return {
       user: normalizeName(userName),
-      userName: normalizeDisplayName(userName) || normalizeName(userName),
+      userName: normalizeName(userName),
       online: false,
       lastSeen: null
     };
@@ -769,14 +733,7 @@ function getFallbackIceServers() {
 
 function requestTwilioToken() {
   return new Promise((resolve) => {
-    const sidNormalized = normalizeSecretValue(TWILIO_ACCOUNT_SID);
-    const tokenNormalized = normalizeSecretValue(TWILIO_AUTH_TOKEN);
-
-    if (!sidNormalized || !tokenNormalized) {
-      logInfo("Twilio", "Twilio credentials are missing in runtime env", {
-        sidPresent: Boolean(sidNormalized),
-        tokenPresent: Boolean(tokenNormalized)
-      });
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
       return resolve({
         ok: true,
         iceServers: getFallbackIceServers(),
@@ -784,34 +741,23 @@ function requestTwilioToken() {
       });
     }
 
-    if (!sidNormalized.startsWith("AC")) {
-      logInfo("Twilio", "TWILIO_ACCOUNT_SID format is invalid for token API", {
-        expectedPrefix: "AC",
-        actualPrefix: sidNormalized.slice(0, 2)
-      });
-      return resolve({
-        ok: true,
-        iceServers: getFallbackIceServers(),
-        provider: "fallback_stun",
-      });
-    }
+    const postData = "Ttl=21600";
 
-    const normalizedPostData = "Ttl=21600";
-    const normalizedOptions = {
+    const options = {
       hostname: "api.twilio.com",
       port: 443,
-      path: `/2010-04-01/Accounts/${sidNormalized}/Tokens.json`,
+      path: `/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Tokens.json`,
       method: "POST",
       headers: {
         "Authorization":
           "Basic " +
-          Buffer.from(`${sidNormalized}:${tokenNormalized}`).toString("base64"),
+          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64"),
         "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(normalizedPostData),
+        "Content-Length": Buffer.byteLength(postData),
       },
     };
 
-    const normalizedReq = https.request(normalizedOptions, (res) => {
+    const req = https.request(options, (res) => {
       let body = "";
 
       res.on("data", (chunk) => {
@@ -819,18 +765,6 @@ function requestTwilioToken() {
       });
 
       res.on("end", () => {
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          logInfo("Twilio", "Twilio token request returned non-success status", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
-          return resolve({
-            ok: true,
-            iceServers: getFallbackIceServers(),
-            provider: "fallback_stun",
-          });
-        }
-
         try {
           const parsed = JSON.parse(body);
 
@@ -842,20 +776,13 @@ function requestTwilioToken() {
             });
           }
 
-          logInfo("Twilio", "Twilio response has no usable ice_servers", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
             provider: "fallback_stun",
           });
         } catch (err) {
-          logInfo("Twilio", "Failed to parse Twilio token response", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
+          logInfo("Twilio", "Failed to parse Twilio token response", err);
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
@@ -865,7 +792,7 @@ function requestTwilioToken() {
       });
     });
 
-    normalizedReq.on("error", (err) => {
+    req.on("error", (err) => {
       logInfo("Twilio", "Twilio token request failed", err);
       return resolve({
         ok: true,
@@ -874,8 +801,8 @@ function requestTwilioToken() {
       });
     });
 
-    normalizedReq.write(normalizedPostData);
-    normalizedReq.end();
+    req.write(postData);
+    req.end();
   });
 }
 
@@ -989,7 +916,7 @@ io.on("connection", (socket) => {
       socketToUser.set(socket.id, userName);
       userToSocket.set(userName, socket.id);
 
-      const updatedUser = await User.findOneAndUpdate(
+      await User.findOneAndUpdate(
         {
           $or: [
             { userName },
@@ -1015,20 +942,6 @@ io.on("connection", (socket) => {
         },
         { upsert: true, returnDocument: "after" }
       );
-
-      // --- دمج حل "آخر ظهور": إبلاغ الأصدقاء بالدخول ---
-      const friends = await Friendship.find({
-        $or: [{ userA: userName }, { userB: userName }]
-      });
-      friends.forEach(f => {
-        const target = f.userA === userName ? f.userB : f.userA;
-        emitToUser(target, "update_status", {
-          userName: userName,
-          online: true,
-          lastSeen: updatedUser.lastSeen
-        });
-      });
-      // ------------------------------------------
 
       socket.emit("registration_success", {
         userName: displayName,
@@ -1113,46 +1026,823 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- دمج حل "آخر ظهور": معالجة انقطاع الاتصال ---
-  socket.on("disconnect", async () => {
-    const userName = socket.data.userName;
-    if (userName) {
-      const now = new Date();
-      await User.findOneAndUpdate({ userName }, { online: false, lastSeen: now });
-      
-      const friends = await Friendship.find({
-        $or: [{ userA: userName }, { userB: userName }]
-      });
-      friends.forEach(f => {
-        const target = f.userA === userName ? f.userB : f.userA;
-        emitToUser(target, "update_status", {
-          userName: userName,
-          online: false,
-          lastSeen: now
-        });
-      });
-      
-      userToSocket.delete(userName);
-      socketToUser.delete(socket.id);
-      await clearUserBusyState(userName, "disconnected");
-      await clearCallStateForUser(userName, "disconnected");
-    }
-    logInfo("Network", `Socket disconnected: ${socket.id}`);
-  });
-  // ------------------------------------------
+  socket.on("find_partner", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) {
+        socket.emit("error_msg", { message: "Please register user before matchmaking" });
+        return;
+      }
 
-  // ... (بقية الأحداث الأصلية الخاصة بك كما هي)
+      const readiness = await validateUserReadyForMatchmaking(me, socket);
+      if (!readiness.ok) {
+        socket.emit("error_msg", { message: "User is not ready for matchmaking yet" });
+        return;
+      }
+
+      await tryMatch(me);
+    } catch (err) {
+      logInfo("Error", "find_partner failed", err);
+      socket.emit("error_msg", { message: "Failed to start search" });
+    }
+  });
+
+  socket.on("stop_search", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const cleanMe = normalizeName(me);
+      const wasInQueue = waitingQueue.includes(cleanMe);
+      const hadPendingMatch = pendingMatchByUser.has(cleanMe);
+      const hadActiveMatch = activeMatches.has(cleanMe);
+
+      if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
+        removeFromQueue(me);
+
+        socket.emit("search_stopped", {
+          success: true,
+          mode: "queue_only"
+        });
+
+        return;
+      }
+
+      await clearUserBusyState(me, "partner_stopped_search");
+
+      socket.emit("search_stopped", {
+        success: true,
+        mode: "relationship_state"
+      });
+    } catch (err) {
+      logInfo("Error", "stop_search failed", err);
+      socket.emit("error_msg", { message: "Failed to stop search" });
+    }
+  });
+
+  socket.on("accept_match", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const key = pendingMatchByUser.get(me);
+      if (!key) return;
+
+      const proposal = pendingMatches.get(key);
+      if (!proposal) return;
+
+      proposal.acceptedBy.add(me);
+      const partner = proposal.userA === me ? proposal.userB : proposal.userA;
+
+      if (proposal.acceptedBy.size === 2) {
+        if (proposal.timeoutId) {
+          clearTimeout(proposal.timeoutId);
+        }
+
+        pendingMatches.delete(key);
+        pendingMatchByUser.delete(proposal.userA);
+        pendingMatchByUser.delete(proposal.userB);
+
+        activeMatches.set(proposal.userA, proposal.userB);
+        activeMatches.set(proposal.userB, proposal.userA);
+
+        const profileA = await getFullUserProfile(proposal.userA);
+        const profileB = await getFullUserProfile(proposal.userB);
+
+        await emitToUser(proposal.userA, "match_confirmed", {
+          partnerName: profileB?.userName || proposal.userB,
+          partnerId: profileB?.userId || proposal.userB
+        });
+        await emitToUser(proposal.userB, "match_confirmed", {
+          partnerName: profileA?.userName || proposal.userA,
+          partnerId: profileA?.userId || proposal.userA
+        });
+      } else {
+        const meProfile = await getFullUserProfile(me);
+        await emitToUser(partner, "partner_accepted", {
+          message: "Partner is ready",
+          partnerName: meProfile?.userName || me,
+          partnerId: meProfile?.userId || me
+        });
+      }
+    } catch (err) {
+      logInfo("Error", "accept_match failed", err);
+    }
+  });
+
+  socket.on("skip_partner", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const pendingKey = pendingMatchByUser.get(me);
+      if (pendingKey) {
+        const proposal = pendingMatches.get(pendingKey);
+        if (proposal) {
+          if (proposal.timeoutId) {
+            clearTimeout(proposal.timeoutId);
+          }
+
+          const other = proposal.userA === me ? proposal.userB : proposal.userA;
+          pendingMatches.delete(pendingKey);
+          pendingMatchByUser.delete(me);
+          pendingMatchByUser.delete(other);
+
+          await emitToUser(other, "match_searching", {
+            status: "searching",
+            message: "Searching for a new partner..."
+          });
+
+          tryMatch(other);
+        }
+
+        return tryMatch(me);
+      }
+
+      const partner = activeMatches.get(me);
+
+      if (partner) {
+        activeMatches.delete(me);
+        activeMatches.delete(partner);
+
+        await emitToUser(partner, "match_searching", {
+          status: "searching",
+          message: "Searching for a new partner..."
+        });
+
+        tryMatch(partner);
+      }
+
+      tryMatch(me);
+    } catch (err) {
+      logInfo("Error", "skip_partner failed", err);
+    }
+  });
+
+  socket.on("message", async (msgContent) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    const cleanText = String(msgContent || "").trim();
+    if (!partner || !cleanText) return;
+
+    try {
+      const msgData = {
+        from: me,
+        to: partner,
+        type: "text",
+        text: cleanText,
+        time: new Date(),
+        conversationKey: pairKey(me, partner)
+      };
+
+      await RandomChatMessage.create(msgData);
+      await emitToUser(partner, "message", msgData);
+    } catch (err) {
+      logInfo("Error", "Random chat message failed to send", err);
+    }
+  });
+
+  socket.on("send_image", async (imgData) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    if (!partner || !imgData?.url) return;
+
+    try {
+      const data = {
+        from: me,
+        to: partner,
+        type: "image",
+        image: imgData.url,
+        time: new Date(),
+        conversationKey: pairKey(me, partner)
+      };
+      await RandomChatMessage.create(data);
+      await emitToUser(partner, "image_received", data);
+    } catch (err) {
+      logInfo("Error", "Image transmission failed", err);
+    }
+  });
+
+  socket.on("typing", (isTyping) => {
+    const me = socket.data.userName;
+    const partner = activeMatches.get(me);
+    if (!partner) return;
+
+    const key = pairKey(me, partner);
+    const oldTimeout = userTypingTimeout.get(key);
+    if (oldTimeout) {
+      clearTimeout(oldTimeout);
+    }
+
+    emitToUser(partner, "partner_typing", { isTyping: Boolean(isTyping) });
+
+    if (isTyping) {
+      const timeoutId = setTimeout(() => {
+        emitToUser(partner, "partner_typing", { isTyping: false });
+        userTypingTimeout.delete(key);
+      }, 2500);
+      userTypingTimeout.set(key, timeoutId);
+    } else {
+      userTypingTimeout.delete(key);
+    }
+  });
+
+  socket.on("send_friend_request", async (targetName) => {
+    const me = socket.data.userName;
+    let to = extractTargetName(targetName);
+    if (!to) {
+      to = activeMatches.get(me) || "";
+    }
+    if (!me || !to || me === to) return;
+
+    try {
+      const targetUser = await User.findOne({
+        $or: [
+          { userName: to },
+          { userId: to }
+        ]
+      }).select("_id userName userId displayName").lean();
+      if (!targetUser) {
+        return socket.emit("error_msg", { message: "Target user does not exist" });
+      }
+
+      const targetId = publicUserId(targetUser);
+      if (!targetId || me === targetId) return;
+
+      const alreadyFriends = await Friendship.findOne({ pairKey: pairKey(me, targetId) }).lean();
+      if (alreadyFriends) {
+        return socket.emit("error_msg", { message: "Already friends" });
+      }
+
+      const existingReq = await FriendRequest.findOne({
+        from: me,
+        to: targetId,
+        status: "pending"
+      }).lean();
+
+      const reverseReq = await FriendRequest.findOne({
+        from: targetId,
+        to: me,
+        status: "pending"
+      }).lean();
+
+      if (reverseReq) {
+        return socket.emit("error_msg", { message: "There is already a pending request from this user" });
+      }
+
+      if (!existingReq) {
+        const myProfile = await getFullUserProfile(me);
+        await FriendRequest.create({ from: me, to: targetId });
+        await emitToUser(targetId, "new_friend_request", {
+          from: myProfile?.userName || me,
+          fromId: me
+        });
+        socket.emit("request_sent", {
+          success: true,
+          to: publicDisplayName(targetUser) || targetId,
+          toId: targetId
+        });
+      } else {
+        socket.emit("error_msg", { message: "Friend request already pending" });
+      }
+    } catch (err) {
+      logInfo("Error", "Friend request system failure", err);
+      socket.emit("error_msg", { message: "Friend request failed" });
+    }
+  });
+
+  socket.on("respond_to_request", async (data) => {
+    const me = socket.data.userName;
+    const from = extractTargetName(data?.fromId || data?.from || data);
+    const accept = Boolean(data?.accept);
+
+    try {
+      const request = await FriendRequest.findOne({ from, to: me, status: "pending" });
+      if (!request) return;
+
+      if (accept) {
+        request.status = "accepted";
+        await request.save();
+
+        const existingFriendship = await Friendship.findOne({ pairKey: pairKey(from, me) }).lean();
+        if (!existingFriendship) {
+          await Friendship.create({
+            userA: from,
+            userB: me,
+            pairKey: pairKey(from, me)
+          });
+        }
+
+        const myProfile = await getFullUserProfile(me);
+        const fromProfile = await getFullUserProfile(from);
+
+        await emitToUser(from, "friend_request_accepted", {
+          by: myProfile?.userName || me,
+          byId: me
+        });
+        await emitToUser(me, "friend_added_successfully", {
+          userName: fromProfile?.userName || from,
+          userId: from
+        });
+        await emitToUser(from, "friend_added_successfully", {
+          userName: myProfile?.userName || me,
+          userId: me
+        });
+        await forceRefreshUserSocketState(me);
+        await forceRefreshUserSocketState(from);
+      } else {
+        request.status = "rejected";
+        await request.save();
+        await emitToUser(from, "friend_request_rejected", { by: me });
+      }
+    } catch (err) {
+      logInfo("Error", "Friend response failed", err);
+      socket.emit("error_msg", { message: "Failed to respond to friend request" });
+    }
+  });
+
+  socket.on("get_friends_status", async (friends) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const list = Array.isArray(friends) ? friends : [];
+      for (const item of list) {
+        const friendName = extractTargetName(item);
+        if (!friendName) continue;
+
+        const status = await getUserStatusSummary(friendName);
+        socket.emit("update_status", status);
+      }
+    } catch (err) {
+      logInfo("Error", "Failed to get friends status", err);
+      socket.emit("error_msg", { message: "Failed to get friends status" });
+    }
+  });
+
+  socket.on("delete_friend", async (payload) => {
+    try {
+      const me = socket.data.userName;
+      const friendName = extractTargetName(payload);
+      if (!me || !friendName || me === friendName) return;
+
+      const currentPairKey = pairKey(me, friendName);
+
+      const existingFriendship = await Friendship.findOne({
+        pairKey: currentPairKey
+      }).lean();
+
+      if (existingFriendship) {
+        await Friendship.deleteOne({ pairKey: currentPairKey });
+      }
+
+      await FriendRequest.deleteMany({
+        $or: [
+          { from: me, to: friendName },
+          { from: friendName, to: me }
+        ]
+      });
+
+      await PrivateMessage.deleteMany({
+        conversationKey: currentPairKey
+      });
+
+      await clearRelationshipRuntimeState(me, friendName);
+
+      const myProfile = await getFullUserProfile(me);
+      const friendProfile = await getFullUserProfile(friendName);
+
+      socket.emit("friend_deleted_successfully", {
+        friend: friendProfile?.userName || friendName,
+        friendId: friendName,
+        message: `Removed ${friendProfile?.userName || friendName} from friends`
+      });
+
+      await emitToUser(friendName, "friend_deleted_me", {
+        from: myProfile?.userName || me,
+        fromId: me,
+        message: `${myProfile?.userName || me} removed you from friends`
+      });
+
+      await forceRefreshUserSocketState(me);
+      await forceRefreshUserSocketState(friendName);
+    } catch (err) {
+      logInfo("Error", "Delete friend failed", err);
+      socket.emit("error_msg", { message: "Failed to delete friend" });
+    }
+  });
+
+  socket.on("get_private_history", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const other = extractTargetName(
+        data?.toId ||
+        data?.friendId ||
+        data?.to ||
+        data?.friend ||
+        data?.with ||
+        data?.userName
+      );
+
+      if (!me || !other) {
+        return socket.emit("private_history", []);
+      }
+
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, other) }).lean();
+      if (!isFriend) {
+        return socket.emit("private_history", []);
+      }
+
+      const messages = await PrivateMessage.find({
+        conversationKey: pairKey(me, other),
+        isDeleted: false
+      })
+        .sort({ time: 1, createdAt: 1 })
+        .lean();
+
+      socket.emit("private_history", messages);
+    } catch (err) {
+      logInfo("Error", "Failed to load private history", err);
+      socket.emit("private_history", []);
+    }
+  });
+
+  socket.on("mark_messages_read", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const friend = extractTargetName(data?.friendId || data?.friend || data?.from || data?.to);
+
+      if (!me || !friend) return;
+
+      await PrivateMessage.updateMany(
+        {
+          conversationKey: pairKey(me, friend),
+          to: me,
+          readBy: { $ne: me }
+        },
+        {
+          $addToSet: { readBy: me }
+        }
+      );
+    } catch (err) {
+      logInfo("Error", "Failed to mark messages as read", err);
+    }
+  });
+
+  socket.on("private_message", async (data) => {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const cleanText = String(data?.text || "").trim();
+    if (!me || !to || !cleanText) return;
+
+    try {
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      if (!isFriend) {
+        return socket.emit("error_msg", { message: "Not friends yet" });
+      }
+
+      const msg = await PrivateMessage.create({
+        from: me,
+        to,
+        text: cleanText,
+        conversationKey: pairKey(me, to),
+        time: new Date(),
+        readBy: [me]
+      });
+
+      const plainMsg = msg.toObject ? msg.toObject() : msg;
+      const myProfile = await getFullUserProfile(me);
+      const targetProfile = await getFullUserProfile(to);
+      plainMsg.fromId = me;
+      plainMsg.toId = to;
+      plainMsg.fromName = myProfile?.userName || me;
+      plainMsg.toName = targetProfile?.userName || to;
+      const delivered = await emitToUser(to, "private_message_received", plainMsg);
+
+      socket.emit("pm_sent_success", {
+        msgId: msg._id,
+        delivered: delivered === true
+      });
+    } catch (err) {
+      logInfo("Error", "Private message system failure", err);
+      socket.emit("error_msg", { message: "Private message failed" });
+    }
+  });
+
+  socket.on("start_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+
+      if (!me || !to || me === to) return;
+
+      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      if (!isFriend) {
+        return socket.emit("error_msg", { message: "Not friends yet" });
+      }
+
+      const targetSocket = await getUserSocket(to);
+      if (!targetSocket) {
+        return socket.emit("call_offline", { to });
+      }
+
+      if (isUserBusyForCall(me) || isUserBusyForCall(to)) {
+        return socket.emit("call_busy", { to });
+      }
+
+      createPendingCall(me, to);
+
+      const myProfile = await getFullUserProfile(me);
+
+      await emitToUser(to, "incoming_call", {
+        from: myProfile?.userName || me,
+        fromId: me,
+        friendId: me,
+        friendName: myProfile?.userName || me,
+      });
+
+      socket.emit("call_ringing", { to });
+
+      logInfo("Call", `Outgoing call from ${me} to ${to}`);
+    } catch (err) {
+      logInfo("Error", "start_private_call failed", err);
+      socket.emit("error_msg", { message: "Failed to start call" });
+    }
+  });
+
+  socket.on("accept_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = extractTargetName(data);
+      if (!me || !from) return;
+
+      const key = pendingCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingCalls.delete(key);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      activeCalls.set(pending.caller, pending.callee);
+      activeCalls.set(pending.callee, pending.caller);
+
+      await emitToUser(pending.caller, "call_accepted", { by: pending.callee });
+      await emitToUser(pending.caller, "call_connected", { with: pending.callee });
+      await emitToUser(pending.callee, "call_connected", { with: pending.caller });
+
+      logInfo("Call", `Call connected between ${pending.caller} and ${pending.callee}`);
+    } catch (err) {
+      logInfo("Error", "accept_private_call failed", err);
+    }
+  });
+
+  socket.on("reject_private_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = extractTargetName(data);
+      if (!me || !from) return;
+
+      const key = pendingCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingCalls.delete(key);
+      pendingCallByUser.delete(pending.caller);
+      pendingCallByUser.delete(pending.callee);
+
+      await emitToUser(from, "call_rejected", { by: me });
+      await emitToUser(me, "call_ended", { reason: "rejected" });
+    } catch (err) {
+      logInfo("Error", "reject_private_call failed", err);
+    }
+  });
+
+  socket.on("end_private_call", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      await clearCallStateForUser(me, "ended");
+    } catch (err) {
+      logInfo("Error", "end_private_call failed", err);
+    }
+  });
+
+  socket.on("webrtc_offer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_offer", {
+        from: me,
+        sdp,
+        type,
+      });
+    } catch (err) {
+      logInfo("Error", "webrtc_offer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay offer" });
+    }
+  });
+
+  socket.on("webrtc_answer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_answer", {
+        from: me,
+        sdp,
+        type,
+      });
+    } catch (err) {
+      logInfo("Error", "webrtc_answer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay answer" });
+    }
+  });
+
+  socket.on("webrtc_ice_candidate", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const candidate = data?.candidate;
+
+      if (!me || !to || !candidate) return;
+
+      const activePartner = activeCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", { message: "Call is not active" });
+      }
+
+      await emitToUser(to, "webrtc_ice_candidate", {
+        from: me,
+        candidate,
+      });
+    } catch (err) {
+      logInfo("Error", "webrtc_ice_candidate failed", err);
+      socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
+    }
+  });
+
+  socket.on("disconnect", async () => {
+    const me = socket.data.userName;
+    logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
+
+    if (me) {
+      await clearCallStateForUser(me, "partner_disconnected");
+
+      const partner = activeMatches.get(me);
+      if (partner) {
+        activeMatches.delete(me);
+        activeMatches.delete(partner);
+        await emitToUser(partner, "match_closed", { reason: "partner_disconnected" });
+      }
+
+      const pKey = pendingMatchByUser.get(me);
+      if (pKey) {
+        const prop = pendingMatches.get(pKey);
+        if (prop) {
+          if (prop.timeoutId) {
+            clearTimeout(prop.timeoutId);
+          }
+          const other = prop.userA === me ? prop.userB : prop.userA;
+          pendingMatches.delete(pKey);
+          pendingMatchByUser.delete(me);
+          pendingMatchByUser.delete(other);
+          await emitToUser(other, "match_cancelled", { reason: "partner_left" });
+        }
+      }
+
+      removeFromQueue(me);
+
+      const typingKeysToDelete = [];
+      for (const [typingKey, timeoutId] of userTypingTimeout.entries()) {
+        if (typingKey.includes(me)) {
+          clearTimeout(timeoutId);
+          typingKeysToDelete.push(typingKey);
+        }
+      }
+      for (const key of typingKeysToDelete) {
+        userTypingTimeout.delete(key);
+      }
+
+      const currentSocketId = userToSocket.get(me);
+      if (currentSocketId === socket.id) {
+        userToSocket.delete(me);
+        await User.findOneAndUpdate(
+          { userName: me },
+          {
+            online: false,
+            lastSeen: new Date(),
+            socketId: null
+          }
+        );
+      }
+    }
+    socketToUser.delete(socket.id);
+  });
 });
 
 // ==========================================
-// 7. تشغيل الخادم
+// 7. API
 // ==========================================
 
-mongoose.connect(DATABASE_URL).then(() => {
-  logInfo("DB", "Connected to MongoDB");
-  server.listen(PORT, () => {
-    logInfo("App", `Server listening on port ${PORT}`);
+app.get("/", (req, res) => {
+  res.send("Fadfad Master Server is running perfectly.");
+});
+
+app.get("/health", async (req, res) => {
+  const dbStatus = mongoose.connection.readyState;
+  res.json({
+    status: "active",
+    database: dbStatus === 1 ? "connected" : "error",
+    metrics: {
+      onlineUsers: userToSocket.size,
+      queueSize: waitingQueue.length,
+      ongoingChats: activeMatches.size / 2,
+      pendingProposals: pendingMatches.size,
+      activeCalls: activeCalls.size / 2,
+      pendingCalls: pendingCalls.size
+    },
+    system: {
+      uptime: process.uptime(),
+      memory: process.memoryUsage().heapUsed / 1024 / 1024 + " MB",
+      platform: process.platform
+    }
   });
-}).catch(err => {
-  console.error("MongoDB connection error:", err);
+});
+
+// ==========================================
+// 8. تشغيل السيرفر
+// ==========================================
+
+async function startMasterServer() {
+  try {
+    logInfo("System", "Initializing database connection...");
+    await mongoose.connect(DATABASE_URL, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000
+    });
+    logInfo("System", "Database connection established.");
+
+    server.listen(PORT, "0.0.0.0", () => {
+      logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
+      logInfo("System", "Ready to receive connections from Flutter app.");
+    });
+  } catch (err) {
+    logInfo("Critical", "Failed to start Master Server", err);
+    process.exit(1);
+  }
+}
+
+startMasterServer();
+
+process.on("unhandledRejection", (reason) => {
+  logInfo("Critical", "Unhandled Promise Rejection detected", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  logInfo("Critical", "Uncaught Exception detected! System remains stable.", err);
 });
