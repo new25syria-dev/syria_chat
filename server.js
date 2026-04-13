@@ -11,15 +11,17 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 
-const envCandidates = [
-  ".env",
-  ".nenv",
-  ".env.txt",
-  "config.env",
-  "vars.env",
-  ".env.production",
-  ".env.development"
-];
+const io = new Server(server, {
+  pingTimeout: 12000,
+  pingInterval: 5000,
+  connectTimeout: 45000,
+  allowEIO3: true,
+  cors: {
+    origin: ALLOWED_ORIGINS.includes("*") ? true : ALLOWED_ORIGINS,
+    methods: ["GET", "POST"],
+    credentials: !ALLOWED_ORIGINS.includes("*"),
+  },
+});
 
 const envPath = envCandidates
   .map((name) => path.join(__dirname, name))
