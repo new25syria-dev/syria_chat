@@ -23,16 +23,6 @@ const io = new Server(server, {
   },
 });
 
-const envPath = envCandidates
-  .map((name) => path.join(__dirname, name))
-  .find((candidate) => fs.existsSync(candidate));
-
-if (envPath) {
-  dotenv.config({ path: envPath });
-} else {
-  dotenv.config();
-}
-
 const PORT = Number(process.env.PORT || 10000);
 const DATABASE_URL = process.env.DATABASE_URL || process.env.MONGO_URI || "";
 
