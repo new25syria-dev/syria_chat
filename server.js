@@ -518,7 +518,6 @@ async function getUserStatusSummary(userName) {
   }
 }
 
-// === حل آخر ظهور الفوري بين الأصدقاء ===
 async function notifyFriendsStatusChanged(userName) {
   try {
     const me = normalizeName(userName);
@@ -1020,7 +1019,9 @@ async function tryMatch(userName) {
       return;
     }
 
-    removeFromQueue(me);
+    if (isUserInQueue(me)) {
+      removeFromQueue(me);
+    }
 
     let partner = null;
 
@@ -1192,7 +1193,6 @@ io.on("connection", (socket) => {
         socketId: socket.id
       });
 
-      // === تحديث حالة آخر ظهور/أونلاين فورًا عند الأصدقاء ===
       await notifyFriendsStatusChanged(userName);
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
@@ -1271,6 +1271,16 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) {
         socket.emit("error_msg", { message: "Please register user before matchmaking" });
+        return;
+      }
+
+      const cleanMe = normalizeName(me);
+
+      if (
+        isUserInQueue(cleanMe) ||
+        activeMatches.has(cleanMe) ||
+        pendingMatchByUser.has(cleanMe)
+      ) {
         return;
       }
 
@@ -1632,7 +1642,6 @@ io.on("connection", (socket) => {
         await forceRefreshUserSocketState(me);
         await forceRefreshUserSocketState(from);
 
-        // إرسال الحالة مباشرة بعد إضافة الصداقة
         await notifyFriendsStatusChanged(me);
         await notifyFriendsStatusChanged(from);
       } else {
@@ -1864,7 +1873,8 @@ io.on("connection", (socket) => {
               online: true,
               lastSeen: new Date()
             }
-          }
+          },
+          { returnDocument: "after" }
         );
       }
 
@@ -2094,10 +2104,10 @@ io.on("connection", (socket) => {
               lastSeen: new Date(),
               socketId: null
             }
-          }
+          },
+          { returnDocument: "after" }
         );
 
-        // === تحديث آخر ظهور فورًا عند الأصدقاء ===
         await notifyFriendsStatusChanged(me);
       }
     }
