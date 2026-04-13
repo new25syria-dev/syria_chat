@@ -451,7 +451,7 @@ async function resolveUserByAnyIdentifier(userName) {
         { userId: cleanName }
       ]
     })
-      .select("userName userId displayName online lastSeen")
+      .select("userName userId displayName online lastSeen socketId")
       .lean();
 
     if (user) return user;
@@ -460,7 +460,7 @@ async function resolveUserByAnyIdentifier(userName) {
       user = await User.findOne({
         displayName: cleanDisplayName
       })
-        .select("userName userId displayName online lastSeen")
+        .select("userName userId displayName online lastSeen socketId")
         .lean();
     }
 
@@ -473,7 +473,7 @@ async function resolveUserByAnyIdentifier(userName) {
           $options: "i"
         }
       })
-        .select("userName userId displayName online lastSeen")
+        .select("userName userId displayName online lastSeen socketId")
         .lean();
     }
 
@@ -492,7 +492,10 @@ async function getUserStatusSummary(userName) {
     if (!user) {
       return {
         user: cleanName,
+        userId: cleanName,
+        friendId: cleanName,
         userName: normalizeDisplayName(userName) || cleanName,
+        displayName: normalizeDisplayName(userName) || cleanName,
         online: false,
         lastSeen: null
       };
@@ -501,17 +504,69 @@ async function getUserStatusSummary(userName) {
     const canonicalId = publicUserId(user);
     const displayName = publicDisplayName(user);
 
+    const liveSocket = await getUserSocket(canonicalId);
+    const isOnlineNow = Boolean(liveSocket);
+
+    if (isOnlineNow && (user.online !== true || user.socketId !== liveSocket.id)) {
+      User.updateOne(
+        {
+          $or: [
+            { userName: canonicalId },
+            { userId: canonicalId }
+          ]
+        },
+        {
+          $set: {
+            online: true,
+            socketId: liveSocket.id,
+            lastSeen: user.lastSeen || new Date()
+          }
+        }
+      ).catch((err) => {
+        logInfo("Status", `Failed to sync online state for ${canonicalId}`, err);
+      });
+    }
+
+    if (!isOnlineNow && user.online === true) {
+      User.updateOne(
+        {
+          $or: [
+            { userName: canonicalId },
+            { userId: canonicalId }
+          ]
+        },
+        {
+          $set: {
+            online: false,
+            socketId: null,
+            lastSeen: user.lastSeen || new Date()
+          }
+        }
+      ).catch((err) => {
+        logInfo("Status", `Failed to sync offline state for ${canonicalId}`, err);
+      });
+    }
+
     return {
       user: canonicalId,
+      userId: canonicalId,
+      friendId: canonicalId,
       userName: displayName || canonicalId,
-      online: user.online === true,
+      displayName: displayName || canonicalId,
+      online: isOnlineNow,
       lastSeen: user.lastSeen || null
     };
   } catch (err) {
     logInfo("DB", `Error fetching status summary for ${userName}`, err);
+    const fallback = normalizeName(userName);
+    const fallbackDisplay = normalizeDisplayName(userName) || fallback;
+
     return {
-      user: normalizeName(userName),
-      userName: normalizeDisplayName(userName) || normalizeName(userName),
+      user: fallback,
+      userId: fallback,
+      friendId: fallback,
+      userName: fallbackDisplay,
+      displayName: fallbackDisplay,
       online: false,
       lastSeen: null
     };
@@ -538,7 +593,15 @@ async function notifyFriendsStatusChanged(userName) {
 
     for (const item of friendships) {
       const friend = item.userA === me ? item.userB : item.userA;
-      await emitToUser(friend, "update_status", myStatus);
+      await emitToUser(friend, "update_status", {
+        user: myStatus.user,
+        userId: myStatus.userId,
+        friendId: myStatus.friendId,
+        userName: myStatus.userName,
+        displayName: myStatus.displayName,
+        online: myStatus.online,
+        lastSeen: myStatus.lastSeen
+      });
     }
   } catch (err) {
     logInfo("Status", `Failed to notify friends status change for ${userName}`, err);
@@ -1661,12 +1724,25 @@ io.on("connection", (socket) => {
       if (!me) return;
 
       const list = Array.isArray(friends) ? friends : [];
+      const seen = new Set();
+
       for (const item of list) {
         const friendName = extractTargetName(item);
         if (!friendName) continue;
+        if (seen.has(friendName)) continue;
+        seen.add(friendName);
 
         const status = await getUserStatusSummary(friendName);
-        socket.emit("update_status", status);
+
+        socket.emit("update_status", {
+          user: status.user,
+          userId: status.userId,
+          friendId: status.friendId,
+          userName: status.userName,
+          displayName: status.displayName,
+          online: status.online,
+          lastSeen: status.lastSeen
+        });
       }
     } catch (err) {
       logInfo("Error", "Failed to get friends status", err);
