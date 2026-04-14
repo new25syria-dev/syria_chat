@@ -1300,52 +1300,54 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("update_profile", async (data) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+ socket.on("update_profile", async (data) => {
+  try {
+    const me = socket.data.userName;
+    if (!me) return;
 
-      const requestedDisplayName = sanitizeOptionalString(
-        normalizeDisplayName(data?.userName),
-        60
-      );
+    const requestedDisplayName = sanitizeOptionalString(
+      normalizeDisplayName(data?.userName),
+      60
+    );
 
-      const updateFields = {
-        profileImage: data?.profileImage || "",
-        country: sanitizeOptionalString(data?.country, 100),
-        age: sanitizeAge(data?.age),
-        bio: sanitizeOptionalString(data?.bio, 500),
-        gender:
-          sanitizeOptionalString(data?.gender || "unspecified", 40) ||
-          "unspecified",
-        lastSeen: new Date(),
-      };
+    const updateFields = {
+      profileImage: data?.profileImage || "",
+      country: sanitizeOptionalString(data?.country, 100),
+      age: sanitizeAge(data?.age),
+      bio: sanitizeOptionalString(data?.bio, 500),
+      gender:
+        sanitizeOptionalString(data?.gender || "unspecified", 40) ||
+        "unspecified",
+      lastSeen: new Date(),
+    };
 
-      if (requestedDisplayName) {
-        updateFields.displayName = requestedDisplayName;
-        socket.data.displayName = requestedDisplayName;
-      }
-
-      const updatedUser = await User.findOneAndUpdate(
-        {
-          $or: [
-            { userName: me },
-            { userId: me }
-          ]
-        },
-        { $set: updateFields },
-        { returnDocument: "after" }
-      ).lean();
-
-      socket.emit("profile_updated", {
-        success: true,
-        user: updatedUser
-      });
-    } catch (err) {
-      logInfo("Error", "Failed to update profile", err);
-      socket.emit("error_msg", { message: "Failed to update profile" });
+    if (requestedDisplayName) {
+      updateFields.displayName = requestedDisplayName;
+      socket.data.displayName = requestedDisplayName;
     }
-  });
+
+    const updatedUser = await User.findOneAndUpdate(
+      {
+        $or: [
+          { userName: me },
+          { userId: me }
+        ]
+      },
+      { $set: updateFields },
+      { returnDocument: "after" }
+    ).lean();
+
+    socket.emit("profile_updated", {
+      success: true,
+      user: updatedUser
+    });
+
+    await notifyFriendsStatusChanged(me);
+  } catch (err) {
+    logInfo("Error", "Failed to update profile", err);
+    socket.emit("error_msg", { message: "Failed to update profile" });
+  }
+});
 
   socket.on("get_turn_credentials", async () => {
     try {
