@@ -496,7 +496,7 @@ async function getUserStatusSummary(userName) {
   friendId: canonicalId,
   userName: displayName || canonicalId,
   displayName: displayName || canonicalId,
-  profileImage: user.profileImage || "", // ✅ أضف هذا السطر
+  profileImage: user.profileImage || "", // ✅ هذا السطر فقط أضفناه
   online: isOnlineNow,
   lastSeen: user.lastSeen || null
 };
