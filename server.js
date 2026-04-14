@@ -1303,7 +1303,7 @@ io.on("connection", (socket) => {
       const requestedDisplayName = sanitizeOptionalString(normalizeDisplayName(data?.userName), 60);
 
       const updateFields = {
-        profileImage: sanitizeUrl(data?.profileImage, 4000),
+        profileImage: data?.profileImage || "",
         country: sanitizeOptionalString(data?.country, 100),
         age: sanitizeAge(data?.age),
         bio: sanitizeOptionalString(data?.bio, 500),
