@@ -451,7 +451,7 @@ async function resolveUserByAnyIdentifier(userName) {
         { userId: cleanName }
       ]
     })
-      .select("userName userId displayName online lastSeen socketId")
+      .select("userName userId displayName online lastSeen socketId profileImage")
       .lean();
 
     if (user) return user;
@@ -460,7 +460,7 @@ async function resolveUserByAnyIdentifier(userName) {
       user = await User.findOne({
         displayName: cleanDisplayName
       })
-        .select("userName userId displayName online lastSeen socketId")
+        .select("userName userId displayName online lastSeen socketId profileImage")
         .lean();
     }
 
@@ -473,7 +473,7 @@ async function resolveUserByAnyIdentifier(userName) {
           $options: "i"
         }
       })
-        .select("userName userId displayName online lastSeen socketId")
+        .select("userName userId displayName online lastSeen socketId profileImage")
         .lean();
     }
 
@@ -496,6 +496,7 @@ async function getUserStatusSummary(userName) {
         friendId: cleanName,
         userName: normalizeDisplayName(userName) || cleanName,
         displayName: normalizeDisplayName(userName) || cleanName,
+        profileImage: "",
         online: false,
         lastSeen: null
       };
@@ -553,6 +554,7 @@ async function getUserStatusSummary(userName) {
       friendId: canonicalId,
       userName: displayName || canonicalId,
       displayName: displayName || canonicalId,
+      profileImage: user.profileImage || "",
       online: isOnlineNow,
       lastSeen: user.lastSeen || null
     };
@@ -567,6 +569,7 @@ async function getUserStatusSummary(userName) {
       friendId: fallback,
       userName: fallbackDisplay,
       displayName: fallbackDisplay,
+      profileImage: "",
       online: false,
       lastSeen: null
     };
@@ -599,6 +602,7 @@ async function notifyFriendsStatusChanged(userName) {
         friendId: myStatus.friendId,
         userName: myStatus.userName,
         displayName: myStatus.displayName,
+        profileImage: myStatus.profileImage || "",
         online: myStatus.online,
         lastSeen: myStatus.lastSeen
       });
@@ -1327,6 +1331,8 @@ io.on("connection", (socket) => {
         success: true,
         user: updatedUser
       });
+
+      await notifyFriendsStatusChanged(me);
     } catch (err) {
       logInfo("Error", "Failed to update profile", err);
       socket.emit("error_msg", { message: "Failed to update profile" });
@@ -1674,7 +1680,8 @@ io.on("connection", (socket) => {
         await FriendRequest.create({ from: me, to: targetId });
         await emitToUser(targetId, "new_friend_request", {
           from: myProfile?.userName || me,
-          fromId: me
+          fromId: me,
+          profileImage: myProfile?.profileImage || ""
         });
         socket.emit("request_sent", {
           success: true,
@@ -1717,17 +1724,20 @@ io.on("connection", (socket) => {
 
         await emitToUser(from, "friend_request_accepted", {
           by: myProfile?.userName || me,
-          byId: me
+          byId: me,
+          profileImage: myProfile?.profileImage || ""
         });
 
         await emitToUser(me, "friend_added_successfully", {
           userName: fromProfile?.userName || from,
-          userId: from
+          userId: from,
+          profileImage: fromProfile?.profileImage || ""
         });
 
         await emitToUser(from, "friend_added_successfully", {
           userName: myProfile?.userName || me,
-          userId: me
+          userId: me,
+          profileImage: myProfile?.profileImage || ""
         });
 
         await forceRefreshUserSocketState(me);
@@ -1762,6 +1772,7 @@ io.on("connection", (socket) => {
           friendId: status.friendId,
           userName: status.userName,
           displayName: status.displayName,
+          profileImage: status.profileImage || "",
           online: status.online,
           lastSeen: status.lastSeen
         });
@@ -1788,6 +1799,7 @@ io.on("connection", (socket) => {
           friendId: status.friendId,
           userName: status.userName,
           displayName: status.displayName,
+          profileImage: status.profileImage || "",
           online: status.online,
           lastSeen: status.lastSeen
         });
@@ -1937,6 +1949,9 @@ io.on("connection", (socket) => {
       plainMsg.toId = to;
       plainMsg.fromName = myProfile?.userName || me;
       plainMsg.toName = targetProfile?.userName || to;
+      plainMsg.profileImage = myProfile?.profileImage || "";
+      plainMsg.fromProfileImage = myProfile?.profileImage || "";
+      plainMsg.toProfileImage = targetProfile?.profileImage || "";
 
       const delivered = await emitToUser(to, "private_message_received", plainMsg);
 
@@ -1980,6 +1995,7 @@ io.on("connection", (socket) => {
         fromId: me,
         friendId: me,
         friendName: myProfile?.userName || me,
+        profileImage: myProfile?.profileImage || ""
       };
 
       if (targetSocket?.id) {
