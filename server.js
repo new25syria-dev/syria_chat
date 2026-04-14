@@ -273,6 +273,25 @@ function sanitizeAge(value) {
   return Math.floor(age);
 }
 
+function sanitizeProfileImage(value, maxLength = 2000000) {
+  if (!value) return "";
+  let clean = String(value).trim();
+
+  if (!clean) return "";
+
+  if (clean.startsWith("data:image")) {
+    const commaIndex = clean.indexOf(",");
+    if (commaIndex !== -1 && commaIndex + 1 < clean.length) {
+      clean = clean.substring(commaIndex + 1).trim();
+    }
+  }
+
+  clean = clean.replace(/\s+/g, "");
+
+  if (!clean) return "";
+  return clean.slice(0, maxLength);
+}
+
 function buildStableUserId(clientId) {
   const cleanClientId = normalizeClientId(clientId);
   if (!cleanClientId) return "";
@@ -423,7 +442,7 @@ async function getFullUserProfile(userName) {
     return {
       userId: canonicalId,
       userName: displayName || canonicalId,
-      profileImage: user.profileImage,
+      profileImage: sanitizeProfileImage(user.profileImage),
       country: user.country,
       age: user.age,
       bio: user.bio,
@@ -553,7 +572,7 @@ async function getUserStatusSummary(userName) {
       friendId: canonicalId,
       userName: displayName || canonicalId,
       displayName: displayName || canonicalId,
-      profileImage: user.profileImage || "",
+      profileImage: sanitizeProfileImage(user.profileImage),
       online: isOnlineNow,
       lastSeen: user.lastSeen || null
     };
@@ -1312,7 +1331,7 @@ io.on("connection", (socket) => {
       );
 
       const updateFields = {
-        profileImage: data?.profileImage || "",
+        profileImage: sanitizeProfileImage(data?.profileImage),
         country: sanitizeOptionalString(data?.country, 100),
         age: sanitizeAge(data?.age),
         bio: sanitizeOptionalString(data?.bio, 500),
@@ -1505,7 +1524,8 @@ io.on("connection", (socket) => {
         await emitToUser(partner, "partner_accepted", {
           message: "Partner is ready",
           partnerName: meProfile?.userName || me,
-          partnerId: meProfile?.userId || me
+          partnerId: meProfile?.userId || me,
+          profileImage: meProfile?.profileImage || ""
         });
       }
     } catch (err) {
@@ -1590,7 +1610,7 @@ io.on("connection", (socket) => {
   socket.on("send_image", async (imgData) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
-    const imageUrl = sanitizeUrl(imgData?.url, 4000);
+    const imageUrl = sanitizeProfileImage(imgData?.url);
 
     if (!partner || !imageUrl) return;
 
@@ -1704,7 +1724,8 @@ io.on("connection", (socket) => {
         await FriendRequest.create({ from: me, to: targetId });
         await emitToUser(targetId, "new_friend_request", {
           from: myProfile?.userName || me,
-          fromId: me
+          fromId: me,
+          profileImage: myProfile?.profileImage || ""
         });
         socket.emit("request_sent", {
           success: true,
@@ -1754,17 +1775,20 @@ io.on("connection", (socket) => {
 
         await emitToUser(from, "friend_request_accepted", {
           by: myProfile?.userName || me,
-          byId: me
+          byId: me,
+          profileImage: myProfile?.profileImage || ""
         });
 
         await emitToUser(me, "friend_added_successfully", {
           userName: fromProfile?.userName || from,
-          userId: from
+          userId: from,
+          profileImage: fromProfile?.profileImage || ""
         });
 
         await emitToUser(from, "friend_added_successfully", {
           userName: myProfile?.userName || me,
-          userId: me
+          userId: me,
+          profileImage: myProfile?.profileImage || ""
         });
 
         await forceRefreshUserSocketState(me);
@@ -1986,6 +2010,8 @@ io.on("connection", (socket) => {
       plainMsg.toId = to;
       plainMsg.fromName = myProfile?.userName || me;
       plainMsg.toName = targetProfile?.userName || to;
+      plainMsg.profileImage = myProfile?.profileImage || "";
+      plainMsg.fromProfileImage = myProfile?.profileImage || "";
 
       const delivered = await emitToUser(to, "private_message_received", plainMsg);
 
