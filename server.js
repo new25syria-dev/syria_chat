@@ -273,16 +273,10 @@ function sanitizeAge(value) {
   return Math.floor(age);
 }
 
-function buildStableUserId(clientId, fallbackName) {
+function buildStableUserId(clientId) {
   const cleanClientId = normalizeClientId(clientId);
-  if (cleanClientId) {
-    return normalizeName(`uid_${cleanClientId}`);
-  }
-
-  const cleanFallback = normalizeName(fallbackName);
-  if (!cleanFallback) return "";
-
-  return cleanFallback;
+  if (!cleanClientId) return "";
+  return normalizeName(`uid_${cleanClientId}`);
 }
 
 function parseRegistrationPayload(rawPayload) {
@@ -1217,7 +1211,13 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const userName = buildStableUserId(registration.clientId, displayName);
+      const cleanClientId = normalizeClientId(registration.clientId);
+      if (!cleanClientId) {
+        socket.emit("error_msg", { message: "Invalid client identity" });
+        return;
+      }
+
+      const userName = buildStableUserId(cleanClientId);
       if (!userName) {
         socket.emit("error_msg", { message: "Invalid user identity" });
         return;
@@ -1247,6 +1247,7 @@ io.on("connection", (socket) => {
       socket.data.userName = userName;
       socket.data.userId = userName;
       socket.data.displayName = displayName;
+      socket.data.clientId = cleanClientId;
 
       socketToUser.set(socket.id, userName);
       userToSocket.set(userName, socket.id);
@@ -1300,54 +1301,54 @@ io.on("connection", (socket) => {
     }
   });
 
- socket.on("update_profile", async (data) => {
-  try {
-    const me = socket.data.userName;
-    if (!me) return;
+  socket.on("update_profile", async (data) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
 
-    const requestedDisplayName = sanitizeOptionalString(
-      normalizeDisplayName(data?.userName),
-      60
-    );
+      const requestedDisplayName = sanitizeOptionalString(
+        normalizeDisplayName(data?.userName),
+        60
+      );
 
-    const updateFields = {
-      profileImage: data?.profileImage || "",
-      country: sanitizeOptionalString(data?.country, 100),
-      age: sanitizeAge(data?.age),
-      bio: sanitizeOptionalString(data?.bio, 500),
-      gender:
-        sanitizeOptionalString(data?.gender || "unspecified", 40) ||
-        "unspecified",
-      lastSeen: new Date(),
-    };
+      const updateFields = {
+        profileImage: data?.profileImage || "",
+        country: sanitizeOptionalString(data?.country, 100),
+        age: sanitizeAge(data?.age),
+        bio: sanitizeOptionalString(data?.bio, 500),
+        gender:
+          sanitizeOptionalString(data?.gender || "unspecified", 40) ||
+          "unspecified",
+        lastSeen: new Date(),
+      };
 
-    if (requestedDisplayName) {
-      updateFields.displayName = requestedDisplayName;
-      socket.data.displayName = requestedDisplayName;
+      if (requestedDisplayName) {
+        updateFields.displayName = requestedDisplayName;
+        socket.data.displayName = requestedDisplayName;
+      }
+
+      const updatedUser = await User.findOneAndUpdate(
+        {
+          $or: [
+            { userName: me },
+            { userId: me }
+          ]
+        },
+        { $set: updateFields },
+        { returnDocument: "after" }
+      ).lean();
+
+      socket.emit("profile_updated", {
+        success: true,
+        user: updatedUser
+      });
+
+      await notifyFriendsStatusChanged(me);
+    } catch (err) {
+      logInfo("Error", "Failed to update profile", err);
+      socket.emit("error_msg", { message: "Failed to update profile" });
     }
-
-    const updatedUser = await User.findOneAndUpdate(
-      {
-        $or: [
-          { userName: me },
-          { userId: me }
-        ]
-      },
-      { $set: updateFields },
-      { returnDocument: "after" }
-    ).lean();
-
-    socket.emit("profile_updated", {
-      success: true,
-      user: updatedUser
-    });
-
-    await notifyFriendsStatusChanged(me);
-  } catch (err) {
-    logInfo("Error", "Failed to update profile", err);
-    socket.emit("error_msg", { message: "Failed to update profile" });
-  }
-});
+  });
 
   socket.on("get_turn_credentials", async () => {
     try {
