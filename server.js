@@ -490,17 +490,16 @@ async function getUserStatusSummary(userName) {
     const user = await resolveUserByAnyIdentifier(userName);
 
     if (!user) {
-      return {
-        user: cleanName,
-        userId: cleanName,
-        friendId: cleanName,
-        userName: normalizeDisplayName(userName) || cleanName,
-        displayName: normalizeDisplayName(userName) || cleanName,
-        profileImage: "",
-        online: false,
-        lastSeen: null
-      };
-    }
+     return {
+  user: canonicalId,
+  userId: canonicalId,
+  friendId: canonicalId,
+  userName: displayName || canonicalId,
+  displayName: displayName || canonicalId,
+  profileImage: user.profileImage || "", // ✅ أضف هذا السطر
+  online: isOnlineNow,
+  lastSeen: user.lastSeen || null
+};
 
     const canonicalId = publicUserId(user);
     const displayName = publicDisplayName(user);
