@@ -171,7 +171,12 @@ const randomChatMessageSchema = new mongoose.Schema(
   {
     from: { type: String, required: true, trim: true, index: true },
     to: { type: String, required: true, trim: true, index: true },
-    type: { type: String, enum: ["text", "image", "voice", "system"], required: true, index: true },
+    type: {
+      type: String,
+      enum: ["text", "image", "voice", "system"],
+      required: true,
+      index: true
+    },
     text: { type: String, default: "", trim: true },
     image: { type: String, default: "" },
     time: { type: Date, default: Date.now, index: true },
@@ -284,14 +289,14 @@ function parseRegistrationPayload(rawPayload) {
   if (rawPayload && typeof rawPayload === "object") {
     const displayName = normalizeDisplayName(
       rawPayload.userName ||
-      rawPayload.displayName ||
-      rawPayload.name
+        rawPayload.displayName ||
+        rawPayload.name
     );
 
     const clientId = normalizeClientId(
       rawPayload.clientId ||
-      rawPayload.deviceId ||
-      rawPayload.accountId
+        rawPayload.deviceId ||
+        rawPayload.accountId
     );
 
     return {
@@ -490,16 +495,17 @@ async function getUserStatusSummary(userName) {
     const user = await resolveUserByAnyIdentifier(userName);
 
     if (!user) {
-     return {
-  user: canonicalId,
-  userId: canonicalId,
-  friendId: canonicalId,
-  userName: displayName || canonicalId,
-  displayName: displayName || canonicalId,
-  profileImage: user.profileImage || "", // ✅ هذا السطر فقط أضفناه
-  online: isOnlineNow,
-  lastSeen: user.lastSeen || null
-};
+      return {
+        user: cleanName,
+        userId: cleanName,
+        friendId: cleanName,
+        userName: normalizeDisplayName(userName) || cleanName,
+        displayName: normalizeDisplayName(userName) || cleanName,
+        profileImage: "",
+        online: false,
+        lastSeen: null
+      };
+    }
 
     const canonicalId = publicUserId(user);
     const displayName = publicDisplayName(user);
@@ -647,14 +653,14 @@ function extractTargetName(rawValue) {
   if (typeof rawValue === "object") {
     return normalizeName(
       rawValue.toId ||
-      rawValue.userId ||
-      rawValue.friendId ||
-      rawValue.to ||
-      rawValue.target ||
-      rawValue.friend ||
-      rawValue.userName ||
-      rawValue.name ||
-      rawValue.fromId
+        rawValue.userId ||
+        rawValue.friendId ||
+        rawValue.to ||
+        rawValue.target ||
+        rawValue.friend ||
+        rawValue.userName ||
+        rawValue.name ||
+        rawValue.fromId
     );
   }
   return normalizeName(rawValue);
@@ -1299,14 +1305,19 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) return;
 
-      const requestedDisplayName = sanitizeOptionalString(normalizeDisplayName(data?.userName), 60);
+      const requestedDisplayName = sanitizeOptionalString(
+        normalizeDisplayName(data?.userName),
+        60
+      );
 
       const updateFields = {
         profileImage: data?.profileImage || "",
         country: sanitizeOptionalString(data?.country, 100),
         age: sanitizeAge(data?.age),
         bio: sanitizeOptionalString(data?.bio, 500),
-        gender: sanitizeOptionalString(data?.gender || "unspecified", 40) || "unspecified",
+        gender:
+          sanitizeOptionalString(data?.gender || "unspecified", 40) ||
+          "unspecified",
         lastSeen: new Date(),
       };
 
@@ -1330,8 +1341,6 @@ io.on("connection", (socket) => {
         success: true,
         user: updatedUser
       });
-
-      await notifyFriendsStatusChanged(me);
     } catch (err) {
       logInfo("Error", "Failed to update profile", err);
       socket.emit("error_msg", { message: "Failed to update profile" });
@@ -1348,10 +1357,14 @@ io.on("connection", (socket) => {
         provider: result.provider,
       });
 
-      logInfo("Twilio", `TURN credentials served to ${socket.data.userName || socket.id}`, {
-        provider: result.provider,
-        count: result.iceServers.length,
-      });
+      logInfo(
+        "Twilio",
+        `TURN credentials served to ${socket.data.userName || socket.id}`,
+        {
+          provider: result.provider,
+          count: result.iceServers.length,
+        }
+      );
     } catch (err) {
       logInfo("Twilio", "Failed to provide turn credentials", err);
       socket.emit("turn_credentials", {
@@ -1366,7 +1379,9 @@ io.on("connection", (socket) => {
     try {
       const me = socket.data.userName;
       if (!me) {
-        socket.emit("error_msg", { message: "Please register user before matchmaking" });
+        socket.emit("error_msg", {
+          message: "Please register user before matchmaking"
+        });
         return;
       }
 
@@ -1647,13 +1662,18 @@ io.on("connection", (socket) => {
       }).select("_id userName userId displayName").lean();
 
       if (!targetUser) {
-        return socket.emit("error_msg", { message: "Target user does not exist" });
+        return socket.emit("error_msg", {
+          message: "Target user does not exist"
+        });
       }
 
       const targetId = publicUserId(targetUser);
       if (!targetId || me === targetId) return;
 
-      const alreadyFriends = await Friendship.findOne({ pairKey: pairKey(me, targetId) }).lean();
+      const alreadyFriends = await Friendship.findOne({
+        pairKey: pairKey(me, targetId)
+      }).lean();
+
       if (alreadyFriends) {
         return socket.emit("error_msg", { message: "Already friends" });
       }
@@ -1671,7 +1691,9 @@ io.on("connection", (socket) => {
       }).lean();
 
       if (reverseReq) {
-        return socket.emit("error_msg", { message: "There is already a pending request from this user" });
+        return socket.emit("error_msg", {
+          message: "There is already a pending request from this user"
+        });
       }
 
       if (!existingReq) {
@@ -1679,8 +1701,7 @@ io.on("connection", (socket) => {
         await FriendRequest.create({ from: me, to: targetId });
         await emitToUser(targetId, "new_friend_request", {
           from: myProfile?.userName || me,
-          fromId: me,
-          profileImage: myProfile?.profileImage || ""
+          fromId: me
         });
         socket.emit("request_sent", {
           success: true,
@@ -1702,14 +1723,21 @@ io.on("connection", (socket) => {
     const accept = Boolean(data?.accept);
 
     try {
-      const request = await FriendRequest.findOne({ from, to: me, status: "pending" });
+      const request = await FriendRequest.findOne({
+        from,
+        to: me,
+        status: "pending"
+      });
       if (!request) return;
 
       if (accept) {
         request.status = "accepted";
         await request.save();
 
-        const existingFriendship = await Friendship.findOne({ pairKey: pairKey(from, me) }).lean();
+        const existingFriendship = await Friendship.findOne({
+          pairKey: pairKey(from, me)
+        }).lean();
+
         if (!existingFriendship) {
           await Friendship.create({
             userA: from,
@@ -1723,20 +1751,17 @@ io.on("connection", (socket) => {
 
         await emitToUser(from, "friend_request_accepted", {
           by: myProfile?.userName || me,
-          byId: me,
-          profileImage: myProfile?.profileImage || ""
+          byId: me
         });
 
         await emitToUser(me, "friend_added_successfully", {
           userName: fromProfile?.userName || from,
-          userId: from,
-          profileImage: fromProfile?.profileImage || ""
+          userId: from
         });
 
         await emitToUser(from, "friend_added_successfully", {
           userName: myProfile?.userName || me,
-          userId: me,
-          profileImage: myProfile?.profileImage || ""
+          userId: me
         });
 
         await forceRefreshUserSocketState(me);
@@ -1751,7 +1776,9 @@ io.on("connection", (socket) => {
       }
     } catch (err) {
       logInfo("Error", "Friend response failed", err);
-      socket.emit("error_msg", { message: "Failed to respond to friend request" });
+      socket.emit("error_msg", {
+        message: "Failed to respond to friend request"
+      });
     }
   });
 
@@ -1866,18 +1893,21 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       const other = extractTargetName(
         data?.toId ||
-        data?.friendId ||
-        data?.to ||
-        data?.friend ||
-        data?.with ||
-        data?.userName
+          data?.friendId ||
+          data?.to ||
+          data?.friend ||
+          data?.with ||
+          data?.userName
       );
 
       if (!me || !other) {
         return socket.emit("private_history", []);
       }
 
-      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, other) }).lean();
+      const isFriend = await Friendship.findOne({
+        pairKey: pairKey(me, other)
+      }).lean();
+
       if (!isFriend) {
         return socket.emit("private_history", []);
       }
@@ -1899,7 +1929,9 @@ io.on("connection", (socket) => {
   socket.on("mark_messages_read", async (data) => {
     try {
       const me = socket.data.userName;
-      const friend = extractTargetName(data?.friendId || data?.friend || data?.from || data?.to);
+      const friend = extractTargetName(
+        data?.friendId || data?.friend || data?.from || data?.to
+      );
 
       if (!me || !friend) return;
 
@@ -1926,7 +1958,10 @@ io.on("connection", (socket) => {
     if (!me || !to || !cleanText) return;
 
     try {
-      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      const isFriend = await Friendship.findOne({
+        pairKey: pairKey(me, to)
+      }).lean();
+
       if (!isFriend) {
         return socket.emit("error_msg", { message: "Not friends yet" });
       }
@@ -1948,9 +1983,6 @@ io.on("connection", (socket) => {
       plainMsg.toId = to;
       plainMsg.fromName = myProfile?.userName || me;
       plainMsg.toName = targetProfile?.userName || to;
-      plainMsg.profileImage = myProfile?.profileImage || "";
-      plainMsg.fromProfileImage = myProfile?.profileImage || "";
-      plainMsg.toProfileImage = targetProfile?.profileImage || "";
 
       const delivered = await emitToUser(to, "private_message_received", plainMsg);
 
@@ -1971,7 +2003,10 @@ io.on("connection", (socket) => {
 
       if (!me || !to || me === to) return;
 
-      const isFriend = await Friendship.findOne({ pairKey: pairKey(me, to) }).lean();
+      const isFriend = await Friendship.findOne({
+        pairKey: pairKey(me, to)
+      }).lean();
+
       if (!isFriend) {
         return socket.emit("error_msg", { message: "Not friends yet" });
       }
@@ -1994,7 +2029,6 @@ io.on("connection", (socket) => {
         fromId: me,
         friendId: me,
         friendName: myProfile?.userName || me,
-        profileImage: myProfile?.profileImage || ""
       };
 
       if (targetSocket?.id) {
@@ -2021,7 +2055,10 @@ io.on("connection", (socket) => {
       socket.emit("call_ringing", { to });
 
       logInfo("Call", `Outgoing call from ${me} to ${to}`);
-      logInfo("Call", `incoming_call delivered directly to socket ${targetSocket.id} for ${to}`);
+      logInfo(
+        "Call",
+        `incoming_call delivered directly to socket ${targetSocket.id} for ${to}`
+      );
     } catch (err) {
       logInfo("Error", "start_private_call failed", err);
       socket.emit("error_msg", { message: "Failed to start call" });
@@ -2061,7 +2098,10 @@ io.on("connection", (socket) => {
       await emitToUser(pending.caller, "call_connected", { with: pending.callee });
       await emitToUser(pending.callee, "call_connected", { with: pending.caller });
 
-      logInfo("Call", `Call connected between ${pending.caller} and ${pending.callee}`);
+      logInfo(
+        "Call",
+        `Call connected between ${pending.caller} and ${pending.callee}`
+      );
     } catch (err) {
       logInfo("Error", "accept_private_call failed", err);
     }
@@ -2195,7 +2235,9 @@ io.on("connection", (socket) => {
       if (partner) {
         activeMatches.delete(me);
         activeMatches.delete(partner);
-        await emitToUser(partner, "match_closed", { reason: "partner_disconnected" });
+        await emitToUser(partner, "match_closed", {
+          reason: "partner_disconnected"
+        });
       }
 
       const pKey = pendingMatchByUser.get(me);
