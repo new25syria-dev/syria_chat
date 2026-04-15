@@ -279,6 +279,11 @@ function sanitizeProfileImage(value, maxLength = 2000000) {
 
   if (!clean) return "";
 
+  const lower = clean.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) {
+    return clean.slice(0, maxLength);
+  }
+
   if (clean.startsWith("data:image")) {
     const commaIndex = clean.indexOf(",");
     if (commaIndex !== -1 && commaIndex + 1 < clean.length) {
@@ -766,6 +771,24 @@ async function validateUserReadyForMatchmaking(userName, socket) {
   }
 }
 
+async function deletePendingFriendRequestsBetween(userA, userB) {
+  try {
+    const a = normalizeName(userA);
+    const b = normalizeName(userB);
+    if (!a || !b || a === b) return;
+
+    await FriendRequest.deleteMany({
+      status: "pending",
+      $or: [
+        { from: a, to: b },
+        { from: b, to: a }
+      ]
+    });
+  } catch (err) {
+    logInfo("FriendRequest", `Failed deleting pending requests between ${userA} and ${userB}`, err);
+  }
+}
+
 function createPendingMatchEntry(userA, userB) {
   const a = normalizeName(userA);
   const b = normalizeName(userB);
@@ -779,6 +802,8 @@ function createPendingMatchEntry(userA, userB) {
       pendingMatches.delete(key);
       pendingMatchByUser.delete(proposal.userA);
       pendingMatchByUser.delete(proposal.userB);
+
+      await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
       await emitToUser(proposal.userA, "match_timeout", { reason: "no_response" });
       await emitToUser(proposal.userB, "match_timeout", { reason: "no_response" });
@@ -885,9 +910,35 @@ async function forceRefreshUserSocketState(userName) {
   }
 }
 
+async function restartSearchForUser(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+
+  if (activeMatches.has(cleanName) || pendingMatchByUser.has(cleanName) || isUserInQueue(cleanName)) {
+    return;
+  }
+
+  await emitToUser(cleanName, "match_searching", {
+    status: "searching",
+    message: "Searching for a new partner..."
+  });
+
+  await tryMatch(cleanName);
+}
+
 async function clearUserBusyState(userName, reason = "state_cleared") {
   const me = normalizeName(userName);
   if (!me) return;
+
+  const wasInQueueOnly =
+    isUserInQueue(me) &&
+    !pendingMatchByUser.has(me) &&
+    !activeMatches.has(me);
+
+  if (wasInQueueOnly) {
+    removeFromQueue(me);
+    return;
+  }
 
   removeFromQueue(me);
 
@@ -895,7 +946,21 @@ async function clearUserBusyState(userName, reason = "state_cleared") {
   if (activePartner) {
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
+
+    await deletePendingFriendRequestsBetween(me, activePartner);
+
     await emitToUser(activePartner, "match_closed", { reason });
+
+    if (
+      reason === "partner_stopped_search" ||
+      reason === "partner_left" ||
+      reason === "partner_disconnected" ||
+      reason === "left_chat"
+    ) {
+      await restartSearchForUser(activePartner);
+    }
+
+    return;
   }
 
   const pendingKey = pendingMatchByUser.get(me);
@@ -912,14 +977,17 @@ async function clearUserBusyState(userName, reason = "state_cleared") {
       pendingMatchByUser.delete(proposal.userA);
       pendingMatchByUser.delete(proposal.userB);
 
-      if (reason === "partner_stopped_search") {
-        await emitToUser(other, "match_searching", {
-          status: "searching",
-          message: "Searching for a new partner..."
-        });
-        await tryMatch(other);
-      } else {
-        await emitToUser(other, "match_cancelled", { reason });
+      await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
+
+      await emitToUser(other, "match_cancelled", { reason });
+
+      if (
+        reason === "partner_stopped_search" ||
+        reason === "partner_left" ||
+        reason === "partner_disconnected" ||
+        reason === "left_chat"
+      ) {
+        await restartSearchForUser(other);
       }
     } else {
       pendingMatchByUser.delete(me);
@@ -934,6 +1002,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
 
   removeFromQueue(a);
   removeFromQueue(b);
+
+  await deletePendingFriendRequestsBetween(a, b);
 
   const activeA = activeMatches.get(a);
   if (activeA === b) {
@@ -1445,13 +1515,21 @@ io.on("connection", (socket) => {
       const hadActiveMatch = activeMatches.has(cleanMe);
 
       if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
-        removeFromQueue(me);
+        removeFromQueue(cleanMe);
 
         socket.emit("search_stopped", {
           success: true,
           mode: "queue_only"
         });
 
+        return;
+      }
+
+      if (!hadPendingMatch && !hadActiveMatch) {
+        socket.emit("search_stopped", {
+          success: true,
+          mode: "self_only"
+        });
         return;
       }
 
@@ -1464,6 +1542,23 @@ io.on("connection", (socket) => {
     } catch (err) {
       logInfo("Error", "stop_search failed", err);
       socket.emit("error_msg", { message: "Failed to stop search" });
+    }
+  });
+
+  socket.on("leave_chat", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      await clearUserBusyState(me, "left_chat");
+
+      socket.emit("search_stopped", {
+        success: true,
+        mode: "leave_chat"
+      });
+    } catch (err) {
+      logInfo("Error", "leave_chat failed", err);
+      socket.emit("error_msg", { message: "Failed to leave chat" });
     }
   });
 
@@ -1547,9 +1642,12 @@ io.on("connection", (socket) => {
           }
 
           const other = proposal.userA === me ? proposal.userB : proposal.userA;
+
           pendingMatches.delete(pendingKey);
           pendingMatchByUser.delete(me);
           pendingMatchByUser.delete(other);
+
+          await deletePendingFriendRequestsBetween(me, other);
 
           await emitToUser(other, "match_searching", {
             status: "searching",
@@ -1568,6 +1666,8 @@ io.on("connection", (socket) => {
       if (partner) {
         activeMatches.delete(me);
         activeMatches.delete(partner);
+
+        await deletePendingFriendRequestsBetween(me, partner);
 
         await emitToUser(partner, "match_searching", {
           status: "searching",
@@ -2259,32 +2359,7 @@ io.on("connection", (socket) => {
 
     if (me) {
       await clearCallStateForUser(me, "partner_disconnected");
-
-      const partner = activeMatches.get(me);
-      if (partner) {
-        activeMatches.delete(me);
-        activeMatches.delete(partner);
-        await emitToUser(partner, "match_closed", {
-          reason: "partner_disconnected"
-        });
-      }
-
-      const pKey = pendingMatchByUser.get(me);
-      if (pKey) {
-        const prop = pendingMatches.get(pKey);
-        if (prop) {
-          if (prop.timeoutId) {
-            clearTimeout(prop.timeoutId);
-          }
-          const other = prop.userA === me ? prop.userB : prop.userA;
-          pendingMatches.delete(pKey);
-          pendingMatchByUser.delete(me);
-          pendingMatchByUser.delete(other);
-          await emitToUser(other, "match_cancelled", { reason: "partner_left" });
-        }
-      }
-
-      removeFromQueue(me);
+      await clearUserBusyState(me, "partner_disconnected");
 
       const typingKeysToDelete = [];
       for (const [typingKey, timeoutId] of userTypingTimeout.entries()) {
