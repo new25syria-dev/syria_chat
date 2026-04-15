@@ -2078,52 +2078,83 @@ io.on("connection", (socket) => {
   });
 
   socket.on("private_message", async (data) => {
-    const me = socket.data.userName;
-    const to = extractTargetName(data);
-    const cleanText = sanitizeText(data?.text, 2000);
+  const me = socket.data.userName;
+  const to = extractTargetName(data);
 
-    if (!me || !to || !cleanText) return;
+  const type = (data?.type || "text").toString().trim().toLowerCase();
+  const cleanText = sanitizeText(data?.text, 2000);
+  const image = typeof data?.image === "string" ? data.image.trim() : "";
+  const audio = typeof data?.audio === "string" ? data.audio.trim() : "";
+  const durationSeconds = Number.isFinite(Number(data?.durationSeconds))
+    ? Math.max(0, Math.min(60, Number(data.durationSeconds)))
+    : 0;
 
-    try {
-      const isFriend = await Friendship.findOne({
-        pairKey: pairKey(me, to)
-      }).lean();
+  const hasText = !!cleanText;
+  const hasImage = !!image;
+  const hasAudio = !!audio;
 
-      if (!isFriend) {
-        return socket.emit("error_msg", { message: "Not friends yet" });
-      }
+  if (!me || !to) return;
 
-      const msg = await PrivateMessage.create({
-        from: me,
-        to,
-        text: cleanText,
-        conversationKey: pairKey(me, to),
-        time: new Date(),
-        readBy: [me]
-      });
+  if (!hasText && !hasImage && !hasAudio) {
+    return;
+  }
 
-      const plainMsg = msg.toObject ? msg.toObject() : msg;
-      const myProfile = await getFullUserProfile(me);
-      const targetProfile = await getFullUserProfile(to);
+  try {
+    const isFriend = await Friendship.findOne({
+      pairKey: pairKey(me, to)
+    }).lean();
 
-      plainMsg.fromId = me;
-      plainMsg.toId = to;
-      plainMsg.fromName = myProfile?.userName || me;
-      plainMsg.toName = targetProfile?.userName || to;
-      plainMsg.profileImage = myProfile?.profileImage || "";
-      plainMsg.fromProfileImage = myProfile?.profileImage || "";
-
-      const delivered = await emitToUser(to, "private_message_received", plainMsg);
-
-      socket.emit("pm_sent_success", {
-        msgId: msg._id,
-        delivered: delivered === true
-      });
-    } catch (err) {
-      logInfo("Error", "Private message system failure", err);
-      socket.emit("error_msg", { message: "Private message failed" });
+    if (!isFriend) {
+      return socket.emit("error_msg", { message: "Not friends yet" });
     }
-  });
+
+    const normalizedType =
+      hasAudio ? "voice" : hasImage ? "image" : "text";
+
+    const msg = await PrivateMessage.create({
+      from: me,
+      to,
+      type: normalizedType,
+      text: cleanText || "",
+      image: hasImage ? image : "",
+      audio: hasAudio ? audio : "",
+      durationSeconds: hasAudio ? durationSeconds : 0,
+      conversationKey: pairKey(me, to),
+      time: new Date(),
+      readBy: [me]
+    });
+
+    const plainMsg = msg.toObject ? msg.toObject() : msg;
+    const myProfile = await getFullUserProfile(me);
+    const targetProfile = await getFullUserProfile(to);
+
+    plainMsg.fromId = me;
+    plainMsg.toId = to;
+    plainMsg.fromName = myProfile?.userName || me;
+    plainMsg.toName = targetProfile?.userName || to;
+    plainMsg.profileImage = myProfile?.profileImage || "";
+    plainMsg.fromProfileImage = myProfile?.profileImage || "";
+    plainMsg.type = normalizedType;
+    plainMsg.text = cleanText || "";
+    plainMsg.image = hasImage ? image : "";
+    plainMsg.audio = hasAudio ? audio : "";
+    plainMsg.durationSeconds = hasAudio ? durationSeconds : 0;
+
+    const delivered = await emitToUser(
+      to,
+      "private_message_received",
+      plainMsg
+    );
+
+    socket.emit("pm_sent_success", {
+      msgId: msg._id,
+      delivered: delivered === true
+    });
+  } catch (err) {
+    logInfo("Error", "Private message system failure", err);
+    socket.emit("error_msg", { message: "Private message failed" });
+  }
+});
 
   socket.on("start_private_call", async (data) => {
     try {
