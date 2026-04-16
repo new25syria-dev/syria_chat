@@ -2077,84 +2077,153 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("private_typing", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const isTyping = Boolean(data?.isTyping);
+
+      if (!me || !to || me === to) return;
+
+      const isFriend = await Friendship.findOne({
+        pairKey: pairKey(me, to)
+      }).lean();
+
+      if (!isFriend) return;
+
+      const typingKey = `${pairKey(me, to)}__${me}`;
+      const oldTimeout = userTypingTimeout.get(typingKey);
+
+      if (oldTimeout) {
+        clearTimeout(oldTimeout);
+        userTypingTimeout.delete(typingKey);
+      }
+
+      await emitToUser(to, "private_typing", {
+        from: me,
+        fromId: me,
+        to,
+        toId: to,
+        isTyping
+      });
+
+      if (isTyping) {
+        const timeoutId = setTimeout(async () => {
+          try {
+            await emitToUser(to, "private_typing", {
+              from: me,
+              fromId: me,
+              to,
+              toId: to,
+              isTyping: false
+            });
+          } catch (err) {
+            logInfo("Typing", `Failed auto-stop typing for ${me} -> ${to}`, err);
+          } finally {
+            userTypingTimeout.delete(typingKey);
+          }
+        }, 3000);
+
+        userTypingTimeout.set(typingKey, timeoutId);
+      }
+    } catch (err) {
+      logInfo("Error", "private_typing failed", err);
+    }
+  });
+
   socket.on("private_message", async (data) => {
-  const me = socket.data.userName;
-  const to = extractTargetName(data);
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
 
-  const type = (data?.type || "text").toString().trim().toLowerCase();
-  const cleanText = sanitizeText(data?.text, 2000);
-  const image = typeof data?.image === "string" ? data.image.trim() : "";
-  const audio = typeof data?.audio === "string" ? data.audio.trim() : "";
-  const durationSeconds = Number.isFinite(Number(data?.durationSeconds))
-    ? Math.max(0, Math.min(60, Number(data.durationSeconds)))
-    : 0;
+    const type = (data?.type || "text").toString().trim().toLowerCase();
+    const cleanText = sanitizeText(data?.text, 2000);
+    const image = typeof data?.image === "string" ? data.image.trim() : "";
+    const audio = typeof data?.audio === "string" ? data.audio.trim() : "";
+    const durationSeconds = Number.isFinite(Number(data?.durationSeconds))
+      ? Math.max(0, Math.min(60, Number(data.durationSeconds)))
+      : 0;
 
-  const hasText = !!cleanText;
-  const hasImage = !!image;
-  const hasAudio = !!audio;
+    const hasText = !!cleanText;
+    const hasImage = !!image;
+    const hasAudio = !!audio;
 
-  if (!me || !to) return;
+    if (!me || !to) return;
 
-  if (!hasText && !hasImage && !hasAudio) {
-    return;
-  }
-
-  try {
-    const isFriend = await Friendship.findOne({
-      pairKey: pairKey(me, to)
-    }).lean();
-
-    if (!isFriend) {
-      return socket.emit("error_msg", { message: "Not friends yet" });
+    if (!hasText && !hasImage && !hasAudio) {
+      return;
     }
 
-    const normalizedType =
-      hasAudio ? "voice" : hasImage ? "image" : "text";
+    try {
+      const isFriend = await Friendship.findOne({
+        pairKey: pairKey(me, to)
+      }).lean();
 
-    const msg = await PrivateMessage.create({
-      from: me,
-      to,
-      type: normalizedType,
-      text: cleanText || "",
-      image: hasImage ? image : "",
-      audio: hasAudio ? audio : "",
-      durationSeconds: hasAudio ? durationSeconds : 0,
-      conversationKey: pairKey(me, to),
-      time: new Date(),
-      readBy: [me]
-    });
+      if (!isFriend) {
+        return socket.emit("error_msg", { message: "Not friends yet" });
+      }
 
-    const plainMsg = msg.toObject ? msg.toObject() : msg;
-    const myProfile = await getFullUserProfile(me);
-    const targetProfile = await getFullUserProfile(to);
+      const typingKey = `${pairKey(me, to)}__${me}`;
+      const oldTypingTimeout = userTypingTimeout.get(typingKey);
+      if (oldTypingTimeout) {
+        clearTimeout(oldTypingTimeout);
+        userTypingTimeout.delete(typingKey);
+      }
 
-    plainMsg.fromId = me;
-    plainMsg.toId = to;
-    plainMsg.fromName = myProfile?.userName || me;
-    plainMsg.toName = targetProfile?.userName || to;
-    plainMsg.profileImage = myProfile?.profileImage || "";
-    plainMsg.fromProfileImage = myProfile?.profileImage || "";
-    plainMsg.type = normalizedType;
-    plainMsg.text = cleanText || "";
-    plainMsg.image = hasImage ? image : "";
-    plainMsg.audio = hasAudio ? audio : "";
-    plainMsg.durationSeconds = hasAudio ? durationSeconds : 0;
+      await emitToUser(to, "private_typing", {
+        from: me,
+        fromId: me,
+        to,
+        toId: to,
+        isTyping: false
+      });
 
-    const delivered = await emitToUser(
-      to,
-      "private_message_received",
-      plainMsg
-    );
+      const normalizedType =
+        hasAudio ? "voice" : hasImage ? "image" : "text";
 
-    socket.emit("pm_sent_success", {
-      msgId: msg._id,
-      delivered: delivered === true
-    });
-  } catch (err) {
-    logInfo("Error", "Private message system failure", err);
-    socket.emit("error_msg", { message: "Private message failed" });
-  }
-});
+      const msg = await PrivateMessage.create({
+        from: me,
+        to,
+        type: normalizedType,
+        text: cleanText || "",
+        image: hasImage ? image : "",
+        audio: hasAudio ? audio : "",
+        durationSeconds: hasAudio ? durationSeconds : 0,
+        conversationKey: pairKey(me, to),
+        time: new Date(),
+        readBy: [me]
+      });
+
+      const plainMsg = msg.toObject ? msg.toObject() : msg;
+      const myProfile = await getFullUserProfile(me);
+      const targetProfile = await getFullUserProfile(to);
+
+      plainMsg.fromId = me;
+      plainMsg.toId = to;
+      plainMsg.fromName = myProfile?.userName || me;
+      plainMsg.toName = targetProfile?.userName || to;
+      plainMsg.profileImage = myProfile?.profileImage || "";
+      plainMsg.fromProfileImage = myProfile?.profileImage || "";
+      plainMsg.type = normalizedType;
+      plainMsg.text = cleanText || "";
+      plainMsg.image = hasImage ? image : "";
+      plainMsg.audio = hasAudio ? audio : "";
+      plainMsg.durationSeconds = hasAudio ? durationSeconds : 0;
+
+      const delivered = await emitToUser(
+        to,
+        "private_message_received",
+        plainMsg
+      );
+
+      socket.emit("pm_sent_success", {
+        msgId: msg._id,
+        delivered: delivered === true
+      });
+    } catch (err) {
+      logInfo("Error", "Private message system failure", err);
+      socket.emit("error_msg", { message: "Private message failed" });
+    }
+  });
 
   socket.on("start_private_call", async (data) => {
     try {
@@ -2397,6 +2466,20 @@ io.on("connection", (socket) => {
         if (typingKey.includes(`__${me}`)) {
           clearTimeout(timeoutId);
           typingKeysToDelete.push(typingKey);
+
+          const pairWithoutSuffix = typingKey.split("__")[0] || "";
+          const users = pairWithoutSuffix.split("__").map(normalizeName);
+          const otherUser = users.find((u) => u && u !== normalizeName(me));
+
+          if (otherUser) {
+            await emitToUser(otherUser, "private_typing", {
+              from: me,
+              fromId: me,
+              to: otherUser,
+              toId: otherUser,
+              isTyping: false
+            });
+          }
         }
       }
       for (const key of typingKeysToDelete) {
