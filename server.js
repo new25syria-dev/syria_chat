@@ -230,6 +230,10 @@ const pendingCalls = new Map();
 const pendingCallByUser = new Map();
 const CALL_RING_TIMEOUT = 30000;
 
+const activeRandomCalls = new Map();
+const pendingRandomCalls = new Map();
+const pendingRandomCallByUser = new Map();
+
 // ==========================================
 // 4. دوال مساعدة
 // ==========================================
@@ -958,7 +962,12 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
 
 function isUserBusyForCall(userName) {
   const cleanName = normalizeName(userName);
-  return activeCalls.has(cleanName) || pendingCallByUser.has(cleanName);
+  return (
+    activeCalls.has(cleanName) ||
+    pendingCallByUser.has(cleanName) ||
+    activeRandomCalls.has(cleanName) ||
+    pendingRandomCallByUser.has(cleanName)
+  );
 }
 
 function createPendingCall(caller, callee) {
@@ -993,6 +1002,42 @@ function createPendingCall(caller, callee) {
   return key;
 }
 
+function createPendingRandomCall(caller, callee) {
+  const key = pairKey(caller, callee);
+
+  const timeoutId = setTimeout(async () => {
+    try {
+      const pending = pendingRandomCalls.get(key);
+      if (!pending) return;
+
+      pendingRandomCalls.delete(key);
+      pendingRandomCallByUser.delete(pending.caller);
+      pendingRandomCallByUser.delete(pending.callee);
+
+      await emitToUser(pending.caller, "random_call_ended", {
+        reason: "no_answer"
+      });
+      await emitToUser(pending.callee, "random_call_ended", {
+        reason: "no_answer"
+      });
+    } catch (err) {
+      logInfo("Error", "Random call timeout cleanup failed", err);
+    }
+  }, CALL_RING_TIMEOUT);
+
+  pendingRandomCalls.set(key, {
+    caller: normalizeName(caller),
+    callee: normalizeName(callee),
+    timeoutId,
+    createdAt: Date.now(),
+  });
+
+  pendingRandomCallByUser.set(normalizeName(caller), key);
+  pendingRandomCallByUser.set(normalizeName(callee), key);
+
+  return key;
+}
+
 async function clearCallStateForUser(userName, reason = "ended") {
   const me = normalizeName(userName);
   if (!me) return;
@@ -1023,6 +1068,40 @@ async function clearCallStateForUser(userName, reason = "ended") {
       await emitToUser(me, "call_ended", { reason });
     } else {
       pendingCallByUser.delete(me);
+    }
+  }
+}
+
+async function clearRandomCallStateForUser(userName, reason = "ended") {
+  const me = normalizeName(userName);
+  if (!me) return;
+
+  const activePartner = activeRandomCalls.get(me);
+  if (activePartner) {
+    activeRandomCalls.delete(me);
+    activeRandomCalls.delete(activePartner);
+    await emitToUser(activePartner, "random_call_ended", { reason });
+    await emitToUser(me, "random_call_ended", { reason });
+  }
+
+  const pendingKey = pendingRandomCallByUser.get(me);
+  if (pendingKey) {
+    const pending = pendingRandomCalls.get(pendingKey);
+    if (pending) {
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      const other = pending.caller === me ? pending.callee : pending.caller;
+
+      pendingRandomCalls.delete(pendingKey);
+      pendingRandomCallByUser.delete(pending.caller);
+      pendingRandomCallByUser.delete(pending.callee);
+
+      await emitToUser(other, "random_call_ended", { reason });
+      await emitToUser(me, "random_call_ended", { reason });
+    } else {
+      pendingRandomCallByUser.delete(me);
     }
   }
 }
@@ -1153,6 +1232,18 @@ async function clearRelationshipRuntimeState(userA, userB) {
     activeMatches.delete(b);
   }
 
+  const activeCallA = activeCalls.get(a);
+  if (activeCallA === b) {
+    activeCalls.delete(a);
+    activeCalls.delete(b);
+  }
+
+  const activeRandomCallA = activeRandomCalls.get(a);
+  if (activeRandomCallA === b) {
+    activeRandomCalls.delete(a);
+    activeRandomCalls.delete(b);
+  }
+
   const pendingKeyA = pendingMatchByUser.get(a);
   if (pendingKeyA) {
     const proposalA = pendingMatches.get(pendingKeyA);
@@ -1192,6 +1283,44 @@ async function clearRelationshipRuntimeState(userA, userB) {
       }
     } else {
       pendingMatchByUser.delete(b);
+    }
+  }
+
+  const pendingPrivateCallKey = pendingCallByUser.get(a);
+  if (pendingPrivateCallKey) {
+    const pendingPrivateCall = pendingCalls.get(pendingPrivateCallKey);
+    if (pendingPrivateCall) {
+      const involvesPair =
+        [pendingPrivateCall.caller, pendingPrivateCall.callee].includes(a) &&
+        [pendingPrivateCall.caller, pendingPrivateCall.callee].includes(b);
+
+      if (involvesPair) {
+        if (pendingPrivateCall.timeoutId) {
+          clearTimeout(pendingPrivateCall.timeoutId);
+        }
+        pendingCalls.delete(pendingPrivateCallKey);
+        pendingCallByUser.delete(pendingPrivateCall.caller);
+        pendingCallByUser.delete(pendingPrivateCall.callee);
+      }
+    }
+  }
+
+  const pendingRandomCallKey = pendingRandomCallByUser.get(a);
+  if (pendingRandomCallKey) {
+    const pendingRandomCall = pendingRandomCalls.get(pendingRandomCallKey);
+    if (pendingRandomCall) {
+      const involvesPair =
+        [pendingRandomCall.caller, pendingRandomCall.callee].includes(a) &&
+        [pendingRandomCall.caller, pendingRandomCall.callee].includes(b);
+
+      if (involvesPair) {
+        if (pendingRandomCall.timeoutId) {
+          clearTimeout(pendingRandomCall.timeoutId);
+        }
+        pendingRandomCalls.delete(pendingRandomCallKey);
+        pendingRandomCallByUser.delete(pendingRandomCall.caller);
+        pendingRandomCallByUser.delete(pendingRandomCall.callee);
+      }
     }
   }
 }
@@ -1759,6 +1888,7 @@ io.on("connection", (socket) => {
       setUserPreferredChatType(me, requestedChatType, socket);
 
       await clearUserBusyState(me, "left_chat", requestedChatType);
+      await clearRandomCallStateForUser(me, "left_chat");
 
       socket.emit("search_stopped", {
         success: true,
@@ -1885,6 +2015,9 @@ io.on("connection", (socket) => {
             chatType: proposalChatType
           });
 
+          await clearRandomCallStateForUser(me, "ended");
+          await clearRandomCallStateForUser(other, "ended");
+
           await tryMatch(other, proposalChatType);
         }
 
@@ -1899,6 +2032,8 @@ io.on("connection", (socket) => {
         activeMatches.delete(partner);
 
         await deletePendingFriendRequestsBetween(me, partner);
+        await clearRandomCallStateForUser(me, "ended");
+        await clearRandomCallStateForUser(partner, "ended");
 
         await emitToUser(partner, "match_searching", {
           status: "searching",
@@ -2535,11 +2670,7 @@ io.on("connection", (socket) => {
       targetSocket.emit("incoming_call", incomingCallPayload);
       socket.emit("call_ringing", { to });
 
-      logInfo("Call", `Outgoing call from ${me} to ${to}`);
-      logInfo(
-        "Call",
-        `incoming_call delivered directly to socket ${targetSocket.id} for ${to}`
-      );
+      logInfo("Call", `Outgoing private call from ${me} to ${to}`);
     } catch (err) {
       logInfo("Error", "start_private_call failed", err);
       socket.emit("error_msg", { message: "Failed to start call" });
@@ -2581,7 +2712,7 @@ io.on("connection", (socket) => {
 
       logInfo(
         "Call",
-        `Call connected between ${pending.caller} and ${pending.callee}`
+        `Private call connected between ${pending.caller} and ${pending.callee}`
       );
     } catch (err) {
       logInfo("Error", "accept_private_call failed", err);
@@ -2705,6 +2836,235 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("start_random_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      let to = extractTargetName(data);
+
+      if (!me) return;
+
+      const matchedPartner = activeMatches.get(me);
+      if (!to) {
+        to = matchedPartner || "";
+      }
+
+      if (!to || me === to) return;
+
+      if (matchedPartner !== to || activeMatches.get(to) !== me) {
+        return socket.emit("error_msg", {
+          message: "Random voice call is not available for this user"
+        });
+      }
+
+      const myChatType = getUserPreferredChatType(me);
+      const partnerChatType = getUserPreferredChatType(to);
+
+      if (myChatType !== "voice" || partnerChatType !== "voice") {
+        return socket.emit("error_msg", {
+          message: "Random voice call requires voice match"
+        });
+      }
+
+      const targetSocket = await getUserSocket(to);
+      if (!targetSocket) {
+        return socket.emit("random_call_offline", { to });
+      }
+
+      if (isUserBusyForCall(me) || isUserBusyForCall(to)) {
+        return socket.emit("random_call_busy", { to });
+      }
+
+      createPendingRandomCall(me, to);
+
+      const myProfile = await getFullUserProfile(me);
+
+      const incomingCallPayload = {
+        from: myProfile?.userName || me,
+        fromId: me,
+        friendId: me,
+        friendName: myProfile?.userName || me,
+      };
+
+      targetSocket.emit("incoming_random_call", incomingCallPayload);
+      socket.emit("random_call_ringing", { to });
+
+      logInfo("Call", `Outgoing random call from ${me} to ${to}`, {
+        chatType: "voice"
+      });
+    } catch (err) {
+      logInfo("Error", "start_random_call failed", err);
+      socket.emit("error_msg", { message: "Failed to start random call" });
+    }
+  });
+
+  socket.on("accept_random_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = extractTargetName(data);
+      if (!me || !from) return;
+
+      const key = pendingRandomCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingRandomCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingRandomCalls.delete(key);
+      pendingRandomCallByUser.delete(pending.caller);
+      pendingRandomCallByUser.delete(pending.callee);
+
+      activeRandomCalls.set(pending.caller, pending.callee);
+      activeRandomCalls.set(pending.callee, pending.caller);
+
+      await emitToUser(pending.caller, "random_call_accepted", {
+        by: pending.callee
+      });
+      await emitToUser(pending.caller, "random_call_connected", {
+        with: pending.callee
+      });
+      await emitToUser(pending.callee, "random_call_connected", {
+        with: pending.caller
+      });
+
+      logInfo("Call", `Random call connected between ${pending.caller} and ${pending.callee}`);
+    } catch (err) {
+      logInfo("Error", "accept_random_call failed", err);
+    }
+  });
+
+  socket.on("reject_random_call", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const from = extractTargetName(data);
+      if (!me || !from) return;
+
+      const key = pendingRandomCallByUser.get(me);
+      if (!key) return;
+
+      const pending = pendingRandomCalls.get(key);
+      if (!pending) return;
+
+      const validPair =
+        (pending.caller === from && pending.callee === me) ||
+        (pending.caller === me && pending.callee === from);
+
+      if (!validPair) return;
+
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+
+      pendingRandomCalls.delete(key);
+      pendingRandomCallByUser.delete(pending.caller);
+      pendingRandomCallByUser.delete(pending.callee);
+
+      await emitToUser(from, "random_call_rejected", { by: me });
+      await emitToUser(me, "random_call_ended", { reason: "rejected" });
+    } catch (err) {
+      logInfo("Error", "reject_random_call failed", err);
+    }
+  });
+
+  socket.on("end_random_call", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      await clearRandomCallStateForUser(me, "ended");
+    } catch (err) {
+      logInfo("Error", "end_random_call failed", err);
+    }
+  });
+
+  socket.on("random_webrtc_offer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeRandomCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", {
+          message: "Random call is not active"
+        });
+      }
+
+      await emitToUser(to, "random_webrtc_offer", {
+        from: me,
+        sdp,
+        type,
+      });
+    } catch (err) {
+      logInfo("Error", "random_webrtc_offer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay random offer" });
+    }
+  });
+
+  socket.on("random_webrtc_answer", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const sdp = data?.sdp;
+      const type = data?.type;
+
+      if (!me || !to || !sdp || !type) return;
+
+      const activePartner = activeRandomCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", {
+          message: "Random call is not active"
+        });
+      }
+
+      await emitToUser(to, "random_webrtc_answer", {
+        from: me,
+        sdp,
+        type,
+      });
+    } catch (err) {
+      logInfo("Error", "random_webrtc_answer failed", err);
+      socket.emit("error_msg", { message: "Failed to relay random answer" });
+    }
+  });
+
+  socket.on("random_webrtc_ice_candidate", async (data) => {
+    try {
+      const me = socket.data.userName;
+      const to = extractTargetName(data);
+      const candidate = data?.candidate;
+
+      if (!me || !to || !candidate) return;
+
+      const activePartner = activeRandomCalls.get(me);
+      if (activePartner !== to) {
+        return socket.emit("error_msg", {
+          message: "Random call is not active"
+        });
+      }
+
+      await emitToUser(to, "random_webrtc_ice_candidate", {
+        from: me,
+        candidate,
+      });
+    } catch (err) {
+      logInfo("Error", "random_webrtc_ice_candidate failed", err);
+      socket.emit("error_msg", { message: "Failed to relay random ICE candidate" });
+    }
+  });
+
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
@@ -2715,6 +3075,7 @@ io.on("connection", (socket) => {
       );
 
       await clearCallStateForUser(me, "partner_disconnected");
+      await clearRandomCallStateForUser(me, "partner_disconnected");
       await clearUserBusyState(me, "partner_disconnected", preservedChatType);
 
       const typingKeysToDelete = [];
@@ -2793,7 +3154,9 @@ app.get("/health", async (req, res) => {
       ongoingChats: activeMatches.size / 2,
       pendingProposals: pendingMatches.size,
       activeCalls: activeCalls.size / 2,
-      pendingCalls: pendingCalls.size
+      pendingCalls: pendingCalls.size,
+      activeRandomCalls: activeRandomCalls.size / 2,
+      pendingRandomCalls: pendingRandomCalls.size
     },
     system: {
       uptime: process.uptime(),
