@@ -62,7 +62,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "8mb" }));
 
 const server = http.createServer(app);
 
@@ -154,14 +154,30 @@ const privateMessageSchema = new mongoose.Schema(
   {
     from: { type: String, required: true, trim: true, index: true },
     to: { type: String, required: true, trim: true, index: true },
+
+    // نص
     text: { type: String, default: "", trim: true },
+
+    // الحقول الجديدة المستخدمة فعليًا في Flutter
+    type: {
+      type: String,
+      enum: ["text", "image", "voice"],
+      default: "text",
+      index: true
+    },
+    image: { type: String, default: "" },
+    audio: { type: String, default: "" },
+    durationSeconds: { type: Number, default: 0 },
+
+    // الحقول القديمة للإبقاء على التوافق
     imageUrl: { type: String, default: "" },
     voiceUrl: { type: String, default: "" },
+    messageType: { type: String, default: "text" },
+
     time: { type: Date, default: Date.now, index: true },
     conversationKey: { type: String, required: true, index: true },
     readBy: { type: [String], default: [] },
     isDeleted: { type: Boolean, default: false },
-    messageType: { type: String, default: "text" },
   },
   { timestamps: true }
 );
@@ -295,6 +311,33 @@ function sanitizeProfileImage(value, maxLength = 2000000) {
 
   if (!clean) return "";
   return clean.slice(0, maxLength);
+}
+
+function sanitizeAudioPayload(value, maxLength = 6000000) {
+  if (!value) return "";
+  let clean = String(value).trim();
+
+  if (!clean) return "";
+
+  if (clean.startsWith("data:audio")) {
+    const commaIndex = clean.indexOf(",");
+    if (commaIndex !== -1 && commaIndex + 1 < clean.length) {
+      clean = clean.substring(commaIndex + 1).trim();
+    }
+  }
+
+  clean = clean.replace(/\s+/g, "");
+  if (!clean) return "";
+
+  return clean.slice(0, maxLength);
+}
+
+function sanitizeDurationSeconds(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  if (parsed < 0) return 0;
+  if (parsed > 60) return 60;
+  return Math.floor(parsed);
 }
 
 function buildStableUserId(clientId) {
@@ -2046,7 +2089,27 @@ io.on("connection", (socket) => {
         .sort({ time: 1, createdAt: 1 })
         .lean();
 
-      socket.emit("private_history", messages);
+      const normalizedMessages = messages.map((msg) => {
+        const normalizedType =
+          msg.type ||
+          msg.messageType ||
+          (msg.audio || msg.voiceUrl ? "voice" : msg.image || msg.imageUrl ? "image" : "text");
+
+        return {
+          ...msg,
+          type: normalizedType,
+          image: msg.image || msg.imageUrl || "",
+          audio: msg.audio || msg.voiceUrl || "",
+          text: msg.text || "",
+          durationSeconds: Number.isFinite(Number(msg.durationSeconds))
+            ? Number(msg.durationSeconds)
+            : 0,
+          fromId: msg.from,
+          toId: msg.to
+        };
+      });
+
+      socket.emit("private_history", normalizedMessages);
     } catch (err) {
       logInfo("Error", "Failed to load private history", err);
       socket.emit("private_history", []);
@@ -2135,23 +2198,17 @@ io.on("connection", (socket) => {
     const me = socket.data.userName;
     const to = extractTargetName(data);
 
-    const type = (data?.type || "text").toString().trim().toLowerCase();
     const cleanText = sanitizeText(data?.text, 2000);
-    const image = typeof data?.image === "string" ? data.image.trim() : "";
-    const audio = typeof data?.audio === "string" ? data.audio.trim() : "";
-    const durationSeconds = Number.isFinite(Number(data?.durationSeconds))
-      ? Math.max(0, Math.min(60, Number(data.durationSeconds)))
-      : 0;
+    const image = sanitizeProfileImage(data?.image);
+    const audio = sanitizeAudioPayload(data?.audio);
+    const durationSeconds = sanitizeDurationSeconds(data?.durationSeconds);
 
     const hasText = !!cleanText;
     const hasImage = !!image;
     const hasAudio = !!audio;
 
     if (!me || !to) return;
-
-    if (!hasText && !hasImage && !hasAudio) {
-      return;
-    }
+    if (!hasText && !hasImage && !hasAudio) return;
 
     try {
       const isFriend = await Friendship.findOne({
@@ -2184,9 +2241,12 @@ io.on("connection", (socket) => {
         from: me,
         to,
         type: normalizedType,
+        messageType: normalizedType,
         text: cleanText || "",
         image: hasImage ? image : "",
+        imageUrl: hasImage ? image : "",
         audio: hasAudio ? audio : "",
+        voiceUrl: hasAudio ? audio : "",
         durationSeconds: hasAudio ? durationSeconds : 0,
         conversationKey: pairKey(me, to),
         time: new Date(),
@@ -2204,9 +2264,12 @@ io.on("connection", (socket) => {
       plainMsg.profileImage = myProfile?.profileImage || "";
       plainMsg.fromProfileImage = myProfile?.profileImage || "";
       plainMsg.type = normalizedType;
+      plainMsg.messageType = normalizedType;
       plainMsg.text = cleanText || "";
       plainMsg.image = hasImage ? image : "";
+      plainMsg.imageUrl = hasImage ? image : "";
       plainMsg.audio = hasAudio ? audio : "";
+      plainMsg.voiceUrl = hasAudio ? audio : "";
       plainMsg.durationSeconds = hasAudio ? durationSeconds : 0;
 
       const delivered = await emitToUser(
