@@ -211,11 +211,15 @@ const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageS
 // 3. إدارة الحالة في الذاكرة
 // ==========================================
 const socketToUser = new Map();
-const waitingQueue = [];
+const waitingQueues = {
+  text: [],
+  voice: []
+};
 const activeMatches = new Map();
 const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
 const userTypingTimeout = new Map();
+const userSearchPreferences = new Map();
 
 const userToSocket = new Map();
 const matchmakingLocks = new Set();
@@ -264,6 +268,22 @@ function normalizeClientId(value) {
 function normalizeSecretValue(value) {
   if (!value) return "";
   return String(value).trim().replace(/^['"]+|['"]+$/g, "");
+}
+
+function normalizeChatType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+
+  if (raw === "voice" || raw === "audio" || raw === "call" || raw === "audio_chat") {
+    return "voice";
+  }
+
+  return "text";
+}
+
+function getUserPreferredChatType(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return "text";
+  return normalizeChatType(userSearchPreferences.get(cleanName));
 }
 
 function sanitizeText(value, maxLength = 2000) {
@@ -388,35 +408,62 @@ function pairKey(a, b) {
   return [x, y].sort().join("__");
 }
 
-function removeFromQueue(userName) {
+function getQueueByChatType(chatType) {
+  return waitingQueues[normalizeChatType(chatType)] || waitingQueues.text;
+}
+
+function getAllQueueSizes() {
+  return Object.values(waitingQueues).reduce((sum, queue) => sum + queue.length, 0);
+}
+
+function removeFromQueue(userName, chatType = null) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
 
+  const targetTypes = chatType
+    ? [normalizeChatType(chatType)]
+    : Object.keys(waitingQueues);
+
   let removed = false;
-  for (let i = waitingQueue.length - 1; i >= 0; i--) {
-    if (waitingQueue[i] === cleanName) {
-      waitingQueue.splice(i, 1);
-      removed = true;
+
+  for (const type of targetTypes) {
+    const queue = getQueueByChatType(type);
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (queue[i] === cleanName) {
+        queue.splice(i, 1);
+        removed = true;
+      }
     }
   }
 
   if (removed) {
-    logInfo("Queue", `User ${cleanName} removed from waiting list.`);
+    logInfo("Queue", `User ${cleanName} removed from waiting list.`, {
+      chatType: chatType ? normalizeChatType(chatType) : "all"
+    });
   }
 
   return removed;
 }
 
-function isUserInQueue(userName) {
-  const cleanName = normalizeName(userName);
-  return waitingQueue.includes(cleanName);
-}
-
-function addToQueue(userName) {
+function isUserInQueue(userName, chatType = null) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
-  if (waitingQueue.includes(cleanName)) return false;
-  waitingQueue.push(cleanName);
+
+  if (chatType) {
+    return getQueueByChatType(chatType).includes(cleanName);
+  }
+
+  return Object.values(waitingQueues).some((queue) => queue.includes(cleanName));
+}
+
+function addToQueue(userName, chatType = "text") {
+  const cleanName = normalizeName(userName);
+  const safeChatType = normalizeChatType(chatType);
+
+  if (!cleanName) return false;
+  if (isUserInQueue(cleanName)) return false;
+
+  getQueueByChatType(safeChatType).push(cleanName);
   return true;
 }
 
@@ -832,9 +879,10 @@ async function deletePendingFriendRequestsBetween(userA, userB) {
   }
 }
 
-function createPendingMatchEntry(userA, userB) {
+function createPendingMatchEntry(userA, userB, chatType = "text") {
   const a = normalizeName(userA);
   const b = normalizeName(userB);
+  const safeChatType = normalizeChatType(chatType);
   const key = pairKey(a, b);
 
   const timeoutId = setTimeout(async () => {
@@ -848,11 +896,17 @@ function createPendingMatchEntry(userA, userB) {
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
-      await emitToUser(proposal.userA, "match_timeout", { reason: "no_response" });
-      await emitToUser(proposal.userB, "match_timeout", { reason: "no_response" });
+      await emitToUser(proposal.userA, "match_timeout", {
+        reason: "no_response",
+        chatType: proposal.chatType
+      });
+      await emitToUser(proposal.userB, "match_timeout", {
+        reason: "no_response",
+        chatType: proposal.chatType
+      });
 
-      await tryMatch(proposal.userA);
-      await tryMatch(proposal.userB);
+      await tryMatch(proposal.userA, proposal.chatType);
+      await tryMatch(proposal.userB, proposal.chatType);
     } catch (err) {
       logInfo("Error", "Pending match timeout cleanup failed", err);
     }
@@ -861,6 +915,7 @@ function createPendingMatchEntry(userA, userB) {
   pendingMatches.set(key, {
     userA: a,
     userB: b,
+    chatType: safeChatType,
     acceptedBy: new Set(),
     createdAt: Date.now(),
     timeoutId
@@ -957,16 +1012,23 @@ async function restartSearchForUser(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return;
 
-  if (activeMatches.has(cleanName) || pendingMatchByUser.has(cleanName) || isUserInQueue(cleanName)) {
+  if (
+    activeMatches.has(cleanName) ||
+    pendingMatchByUser.has(cleanName) ||
+    isUserInQueue(cleanName)
+  ) {
     return;
   }
 
+  const preferredChatType = getUserPreferredChatType(cleanName);
+
   await emitToUser(cleanName, "match_searching", {
     status: "searching",
-    message: "Searching for a new partner..."
+    message: "Searching for a new partner...",
+    chatType: preferredChatType
   });
 
-  await tryMatch(cleanName);
+  await tryMatch(cleanName, preferredChatType);
 }
 
 async function clearUserBusyState(userName, reason = "state_cleared") {
@@ -1224,7 +1286,7 @@ function requestTwilioToken() {
 // 5. منطق المطابقة
 // ==========================================
 
-async function tryMatch(userName) {
+async function tryMatch(userName, requestedChatType = null) {
   const me = normalizeName(userName);
   if (!me) return;
 
@@ -1245,14 +1307,17 @@ async function tryMatch(userName) {
       return;
     }
 
+    const chatType = normalizeChatType(requestedChatType || socketChatTypeFromUser(mySocket, me));
+
     if (isUserInQueue(me)) {
       removeFromQueue(me);
     }
 
     let partner = null;
+    const queue = getQueueByChatType(chatType);
 
-    for (let i = 0; i < waitingQueue.length; i++) {
-      const candidate = normalizeName(waitingQueue[i]);
+    for (let i = 0; i < queue.length; i++) {
+      const candidate = normalizeName(queue[i]);
       if (!candidate || candidate === me) continue;
 
       if (!acquireMatchLock(candidate)) {
@@ -1273,18 +1338,20 @@ async function tryMatch(userName) {
         }
 
         const partnerSocket = await getUserSocket(candidate);
+        const candidateChatType = getUserPreferredChatType(candidate);
 
         if (
           partnerSocket &&
+          candidateChatType === chatType &&
           !activeMatches.has(candidate) &&
           !pendingMatchByUser.has(candidate)
         ) {
           partner = candidate;
-          waitingQueue.splice(i, 1);
+          queue.splice(i, 1);
           break;
         }
 
-        waitingQueue.splice(i, 1);
+        queue.splice(i, 1);
         i--;
 
         releaseMatchLock(candidate);
@@ -1297,23 +1364,32 @@ async function tryMatch(userName) {
     }
 
     if (partner) {
-      const key = createPendingMatchEntry(me, partner);
+      const key = createPendingMatchEntry(me, partner, chatType);
 
       const myProfile = await getFullUserProfile(me);
       const partnerProfile = await getFullUserProfile(partner);
 
-      await emitToUser(me, "match_found", { partner: partnerProfile, proposalKey: key });
-      await emitToUser(partner, "match_found", { partner: myProfile, proposalKey: key });
+      await emitToUser(me, "match_found", {
+        partner: partnerProfile,
+        proposalKey: key,
+        chatType
+      });
+      await emitToUser(partner, "match_found", {
+        partner: myProfile,
+        proposalKey: key,
+        chatType
+      });
 
       if (lockedPartner === partner) {
         releaseMatchLock(partner);
         lockedPartner = null;
       }
     } else {
-      addToQueue(me);
+      addToQueue(me, chatType);
       await emitToUser(me, "waiting_in_queue", {
         status: "searching",
-        message: "Searching for a partner..."
+        message: "Searching for a partner...",
+        chatType
       });
     }
   } catch (err) {
@@ -1324,6 +1400,13 @@ async function tryMatch(userName) {
     }
     releaseMatchLock(me);
   }
+}
+
+function socketChatTypeFromUser(socket, userName) {
+  if (socket?.data?.chatType) {
+    return socket.data.chatType;
+  }
+  return getUserPreferredChatType(userName);
 }
 
 // ==========================================
@@ -1380,9 +1463,11 @@ io.on("connection", (socket) => {
       socket.data.userId = userName;
       socket.data.displayName = displayName;
       socket.data.clientId = cleanClientId;
+      socket.data.chatType = "text";
 
       socketToUser.set(socket.id, userName);
       userToSocket.set(userName, socket.id);
+      userSearchPreferences.set(userName, "text");
 
       await User.findOneAndUpdate(
         {
@@ -1510,7 +1595,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("find_partner", async () => {
+  socket.on("find_partner", async (payload) => {
     try {
       const me = socket.data.userName;
       if (!me) {
@@ -1521,6 +1606,10 @@ io.on("connection", (socket) => {
       }
 
       const cleanMe = normalizeName(me);
+      const chatType = normalizeChatType(payload?.chatType);
+
+      socket.data.chatType = chatType;
+      userSearchPreferences.set(cleanMe, chatType);
 
       if (
         isUserInQueue(cleanMe) ||
@@ -1540,7 +1629,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      await tryMatch(me);
+      await tryMatch(me, chatType);
     } catch (err) {
       logInfo("Error", "find_partner failed", err);
       socket.emit("error_msg", { message: "Failed to start search" });
@@ -1643,7 +1732,8 @@ io.on("connection", (socket) => {
           gender: profileB?.gender ?? "unspecified",
           profileImage: profileB?.profileImage ?? "",
           lastSeen: profileB?.lastSeen ?? null,
-          online: profileB?.online === true
+          online: profileB?.online === true,
+          chatType: proposal.chatType
         });
 
         await emitToUser(proposal.userB, "match_confirmed", {
@@ -1655,7 +1745,8 @@ io.on("connection", (socket) => {
           gender: profileA?.gender ?? "unspecified",
           profileImage: profileA?.profileImage ?? "",
           lastSeen: profileA?.lastSeen ?? null,
-          online: profileA?.online === true
+          online: profileA?.online === true,
+          chatType: proposal.chatType
         });
       } else {
         const meProfile = await getFullUserProfile(me);
@@ -1663,7 +1754,8 @@ io.on("connection", (socket) => {
           message: "Partner is ready",
           partnerName: meProfile?.userName || me,
           partnerId: meProfile?.userId || me,
-          profileImage: meProfile?.profileImage || ""
+          profileImage: meProfile?.profileImage || "",
+          chatType: proposal.chatType
         });
       }
     } catch (err) {
@@ -1676,7 +1768,9 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       if (!me) return;
 
+      const myChatType = getUserPreferredChatType(me);
       const pendingKey = pendingMatchByUser.get(me);
+
       if (pendingKey) {
         const proposal = pendingMatches.get(pendingKey);
         if (proposal) {
@@ -1685,6 +1779,7 @@ io.on("connection", (socket) => {
           }
 
           const other = proposal.userA === me ? proposal.userB : proposal.userA;
+          const proposalChatType = proposal.chatType || myChatType;
 
           pendingMatches.delete(pendingKey);
           pendingMatchByUser.delete(me);
@@ -1694,13 +1789,14 @@ io.on("connection", (socket) => {
 
           await emitToUser(other, "match_searching", {
             status: "searching",
-            message: "Searching for a new partner..."
+            message: "Searching for a new partner...",
+            chatType: proposalChatType
           });
 
-          await tryMatch(other);
+          await tryMatch(other, proposalChatType);
         }
 
-        await tryMatch(me);
+        await tryMatch(me, myChatType);
         return;
       }
 
@@ -1714,13 +1810,14 @@ io.on("connection", (socket) => {
 
         await emitToUser(partner, "match_searching", {
           status: "searching",
-          message: "Searching for a new partner..."
+          message: "Searching for a new partner...",
+          chatType: getUserPreferredChatType(partner)
         });
 
-        await tryMatch(partner);
+        await tryMatch(partner, getUserPreferredChatType(partner));
       }
 
-      await tryMatch(me);
+      await tryMatch(me, myChatType);
     } catch (err) {
       logInfo("Error", "skip_partner failed", err);
     }
@@ -2594,7 +2691,9 @@ app.get("/health", async (req, res) => {
     database: dbStatus === 1 ? "connected" : "error",
     metrics: {
       onlineUsers: userToSocket.size,
-      queueSize: waitingQueue.length,
+      queueSize: getAllQueueSizes(),
+      textQueueSize: waitingQueues.text.length,
+      voiceQueueSize: waitingQueues.voice.length,
       ongoingChats: activeMatches.size / 2,
       pendingProposals: pendingMatches.size,
       activeCalls: activeCalls.size / 2,
