@@ -325,7 +325,6 @@ function unlockUserSearch(userName) {
 
 function isUserLocked(userName) {
   const cleanName = normalizeName(userName);
-  if (!cleanName) return false;
   return userSearchLocks.has(cleanName);
 }
 
@@ -945,6 +944,8 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
       pendingMatches.delete(key);
       pendingMatchByUser.delete(proposal.userA);
       pendingMatchByUser.delete(proposal.userB);
+      unlockUserSearch(proposal.userA);
+      unlockUserSearch(proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1000,6 +1001,8 @@ function createPendingCall(caller, callee) {
       pendingCalls.delete(key);
       pendingCallByUser.delete(pending.caller);
       pendingCallByUser.delete(pending.callee);
+      unlockUserSearch(pending.caller);
+      unlockUserSearch(pending.callee);
 
       await emitToUser(pending.caller, "call_ended", { reason: "no_answer" });
       await emitToUser(pending.callee, "call_ended", { reason: "no_answer" });
@@ -1032,6 +1035,8 @@ function createPendingRandomCall(caller, callee) {
       pendingRandomCalls.delete(key);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
+      unlockUserSearch(pending.caller);
+      unlockUserSearch(pending.callee);
 
       await emitToUser(pending.caller, "random_call_ended", {
         reason: "no_answer"
@@ -1248,7 +1253,6 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       pendingMatchByUser.delete(me);
       unlockUserSearch(me);
     }
-
     return;
   }
 
@@ -1306,9 +1310,12 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingMatches.delete(pendingKeyA);
         pendingMatchByUser.delete(proposalA.userA);
         pendingMatchByUser.delete(proposalA.userB);
+        unlockUserSearch(proposalA.userA);
+        unlockUserSearch(proposalA.userB);
       }
     } else {
       pendingMatchByUser.delete(a);
+      unlockUserSearch(a);
     }
   }
 
@@ -1327,9 +1334,12 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingMatches.delete(pendingKeyB);
         pendingMatchByUser.delete(proposalB.userA);
         pendingMatchByUser.delete(proposalB.userB);
+        unlockUserSearch(proposalB.userA);
+        unlockUserSearch(proposalB.userB);
       }
     } else {
       pendingMatchByUser.delete(b);
+      unlockUserSearch(b);
     }
   }
 
@@ -1348,6 +1358,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingCalls.delete(pendingPrivateCallKey);
         pendingCallByUser.delete(pendingPrivateCall.caller);
         pendingCallByUser.delete(pendingPrivateCall.callee);
+        unlockUserSearch(pendingPrivateCall.caller);
+        unlockUserSearch(pendingPrivateCall.callee);
       }
     }
   }
@@ -1367,6 +1379,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingRandomCalls.delete(pendingRandomCallKey);
         pendingRandomCallByUser.delete(pendingRandomCall.caller);
         pendingRandomCallByUser.delete(pendingRandomCall.callee);
+        unlockUserSearch(pendingRandomCall.caller);
+        unlockUserSearch(pendingRandomCall.callee);
       }
     }
   }
