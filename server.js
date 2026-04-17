@@ -232,6 +232,9 @@ const activeRandomCalls = new Map();
 const pendingRandomCalls = new Map();
 const pendingRandomCallByUser = new Map();
 
+const voiceMatchGrace = new Map();
+const VOICE_MATCH_GRACE_MS = 20000;
+
 // ==========================================
 // 4. دوال مساعدة
 // ==========================================
@@ -324,6 +327,33 @@ function isUserLocked(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
   return userSearchLocks.has(cleanName);
+}
+
+function setVoiceMatchGrace(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  voiceMatchGrace.set(cleanName, Date.now() + VOICE_MATCH_GRACE_MS);
+}
+
+function clearVoiceMatchGrace(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  voiceMatchGrace.delete(cleanName);
+}
+
+function hasVoiceMatchGrace(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
+
+  const expiresAt = voiceMatchGrace.get(cleanName);
+  if (!expiresAt) return false;
+
+  if (Date.now() > expiresAt) {
+    voiceMatchGrace.delete(cleanName);
+    return false;
+  }
+
+  return true;
 }
 
 function sanitizeText(value, maxLength = 2000) {
@@ -478,6 +508,17 @@ function isUserUnavailableForMatch(userName) {
   );
 }
 
+function isUserInVoiceTransition(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
+  if (!hasVoiceMatchGrace(cleanName)) return false;
+  if (!activeMatches.has(cleanName)) return false;
+  if (activeRandomCalls.has(cleanName) || pendingRandomCallByUser.has(cleanName)) {
+    return false;
+  }
+  return getUserPreferredChatType(cleanName) === "voice";
+}
+
 function removeFromQueue(userName, chatType = null) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
@@ -526,6 +567,7 @@ function addToQueue(userName, chatType = "text") {
 
   if (!cleanName) return false;
   if (isUserUnavailableForMatch(cleanName)) return false;
+  if (isUserInVoiceTransition(cleanName)) return false;
   if (isUserInQueue(cleanName)) return false;
 
   getQueueByChatType(safeChatType).push(cleanName);
@@ -967,6 +1009,8 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
       pendingMatchByUser.delete(proposal.userB);
       unlockUserSearch(proposal.userA);
       unlockUserSearch(proposal.userB);
+      clearVoiceMatchGrace(proposal.userA);
+      clearVoiceMatchGrace(proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1048,6 +1092,8 @@ function createPendingRandomCall(caller, callee) {
       pendingRandomCallByUser.delete(pending.callee);
       unlockUserSearch(pending.caller);
       unlockUserSearch(pending.callee);
+      clearVoiceMatchGrace(pending.caller);
+      clearVoiceMatchGrace(pending.callee);
 
       await emitToUser(pending.caller, "random_call_ended", {
         reason: "no_answer"
@@ -1124,6 +1170,8 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
     activeRandomCalls.delete(activePartner);
     unlockUserSearch(me);
     unlockUserSearch(activePartner);
+    clearVoiceMatchGrace(me);
+    clearVoiceMatchGrace(activePartner);
     await emitToUser(activePartner, "random_call_ended", { reason });
     await emitToUser(me, "random_call_ended", { reason });
   }
@@ -1143,14 +1191,18 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       pendingRandomCallByUser.delete(pending.callee);
       unlockUserSearch(me);
       unlockUserSearch(other);
+      clearVoiceMatchGrace(me);
+      clearVoiceMatchGrace(other);
 
       await emitToUser(other, "random_call_ended", { reason });
       await emitToUser(me, "random_call_ended", { reason });
     } else {
       pendingRandomCallByUser.delete(me);
       unlockUserSearch(me);
+      clearVoiceMatchGrace(me);
     }
-  } else {
+  } else if (!activeRandomCalls.has(me)) {
+    clearVoiceMatchGrace(me);
     unlockUserSearch(me);
   }
 }
@@ -1171,7 +1223,8 @@ async function restartSearchForUser(userName) {
 
   if (
     isUserUnavailableForMatch(cleanName) ||
-    isUserInQueue(cleanName)
+    isUserInQueue(cleanName) ||
+    isUserInVoiceTransition(cleanName)
   ) {
     return;
   }
@@ -1193,6 +1246,28 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
 
   const safeChatType = chatType ? normalizeChatType(chatType) : null;
 
+  logInfo("DEBUG", "clearUserBusyState called", {
+    user: me,
+    reason,
+    chatType: safeChatType,
+    activePartner: activeMatches.get(me) || null,
+    pendingKey: pendingMatchByUser.get(me) || null,
+    inQueue: isUserInQueue(me, safeChatType),
+    locked: isUserLocked(me),
+  });
+
+  if (
+    (reason === "left_chat" || reason === "partner_stopped_search") &&
+    isUserInVoiceTransition(me)
+  ) {
+    logInfo("DEBUG", "clearUserBusyState ignored during voice transition", {
+      user: me,
+      reason,
+      chatType: safeChatType,
+    });
+    return;
+  }
+
   const wasInQueueOnly =
     isUserInQueue(me, safeChatType) &&
     !pendingMatchByUser.has(me) &&
@@ -1208,10 +1283,18 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
 
   const activePartner = activeMatches.get(me);
   if (activePartner) {
+    logInfo("DEBUG", "clearUserBusyState clearing active match", {
+      user: me,
+      partner: activePartner,
+      reason,
+    });
+
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
     unlockUserSearch(me);
     unlockUserSearch(activePartner);
+    clearVoiceMatchGrace(me);
+    clearVoiceMatchGrace(activePartner);
 
     await deletePendingFriendRequestsBetween(me, activePartner);
 
@@ -1244,6 +1327,8 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       pendingMatchByUser.delete(proposal.userB);
       unlockUserSearch(proposal.userA);
       unlockUserSearch(proposal.userB);
+      clearVoiceMatchGrace(proposal.userA);
+      clearVoiceMatchGrace(proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1260,6 +1345,7 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
     } else {
       pendingMatchByUser.delete(me);
       unlockUserSearch(me);
+      clearVoiceMatchGrace(me);
     }
     return;
   }
@@ -1276,6 +1362,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
   removeFromQueue(b);
   unlockUserSearch(a);
   unlockUserSearch(b);
+  clearVoiceMatchGrace(a);
+  clearVoiceMatchGrace(b);
 
   await deletePendingFriendRequestsBetween(a, b);
 
@@ -1320,10 +1408,13 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingMatchByUser.delete(proposalA.userB);
         unlockUserSearch(proposalA.userA);
         unlockUserSearch(proposalA.userB);
+        clearVoiceMatchGrace(proposalA.userA);
+        clearVoiceMatchGrace(proposalA.userB);
       }
     } else {
       pendingMatchByUser.delete(a);
       unlockUserSearch(a);
+      clearVoiceMatchGrace(a);
     }
   }
 
@@ -1344,10 +1435,13 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingMatchByUser.delete(proposalB.userB);
         unlockUserSearch(proposalB.userA);
         unlockUserSearch(proposalB.userB);
+        clearVoiceMatchGrace(proposalB.userA);
+        clearVoiceMatchGrace(proposalB.userB);
       }
     } else {
       pendingMatchByUser.delete(b);
       unlockUserSearch(b);
+      clearVoiceMatchGrace(b);
     }
   }
 
@@ -1389,6 +1483,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
         pendingRandomCallByUser.delete(pendingRandomCall.callee);
         unlockUserSearch(pendingRandomCall.caller);
         unlockUserSearch(pendingRandomCall.callee);
+        clearVoiceMatchGrace(pendingRandomCall.caller);
+        clearVoiceMatchGrace(pendingRandomCall.callee);
       }
     }
   }
@@ -1532,7 +1628,7 @@ async function tryMatch(userName, requestedChatType = null) {
       return;
     }
 
-    if (isUserUnavailableForMatch(me)) {
+    if (isUserUnavailableForMatch(me) || isUserInVoiceTransition(me)) {
       return;
     }
 
@@ -1582,7 +1678,8 @@ async function tryMatch(userName, requestedChatType = null) {
         if (
           partnerSocket &&
           candidateChatType === chatType &&
-          !isUserUnavailableForMatch(candidate)
+          !isUserUnavailableForMatch(candidate) &&
+          !isUserInVoiceTransition(candidate)
         ) {
           partner = candidate;
           queue.splice(i, 1);
@@ -1876,7 +1973,11 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (isUserInQueue(cleanMe) || isUserUnavailableForMatch(cleanMe)) {
+      if (
+        isUserInQueue(cleanMe) ||
+        isUserUnavailableForMatch(cleanMe) ||
+        isUserInVoiceTransition(cleanMe)
+      ) {
         return;
       }
 
@@ -1959,6 +2060,21 @@ io.on("connection", (socket) => {
       );
       setUserPreferredChatType(me, requestedChatType, socket);
 
+      logInfo("DEBUG", "leave_chat received", {
+        user: me,
+        socketId: socket.id,
+        chatType: requestedChatType,
+      });
+
+      if (requestedChatType === "voice" && isUserInVoiceTransition(me)) {
+        logInfo("DEBUG", "leave_chat ignored during voice transition", {
+          user: me,
+          socketId: socket.id,
+          chatType: requestedChatType,
+        });
+        return;
+      }
+
       await clearUserBusyState(me, "left_chat", requestedChatType);
       await clearRandomCallStateForUser(me, "left_chat");
 
@@ -2005,6 +2121,25 @@ io.on("connection", (socket) => {
         activeMatches.set(proposal.userB, proposal.userA);
         lockUserSearch(proposal.userA);
         lockUserSearch(proposal.userB);
+
+        if (proposal.chatType === "voice") {
+          setVoiceMatchGrace(proposal.userA);
+          setVoiceMatchGrace(proposal.userB);
+        } else {
+          clearVoiceMatchGrace(proposal.userA);
+          clearVoiceMatchGrace(proposal.userB);
+        }
+
+        logInfo("DEBUG", "match state stored", {
+          userA: proposal.userA,
+          userB: proposal.userB,
+          activeA: activeMatches.get(proposal.userA),
+          activeB: activeMatches.get(proposal.userB),
+          lockedA: isUserLocked(proposal.userA),
+          lockedB: isUserLocked(proposal.userB),
+          graceA: hasVoiceMatchGrace(proposal.userA),
+          graceB: hasVoiceMatchGrace(proposal.userB),
+        });
 
         const profileA = await getFullUserProfile(proposal.userA);
         const profileB = await getFullUserProfile(proposal.userB);
@@ -2082,6 +2217,8 @@ io.on("connection", (socket) => {
           pendingMatchByUser.delete(other);
           unlockUserSearch(me);
           unlockUserSearch(other);
+          clearVoiceMatchGrace(me);
+          clearVoiceMatchGrace(other);
 
           await deletePendingFriendRequestsBetween(me, other);
 
@@ -2108,6 +2245,8 @@ io.on("connection", (socket) => {
         activeMatches.delete(partner);
         unlockUserSearch(me);
         unlockUserSearch(partner);
+        clearVoiceMatchGrace(me);
+        clearVoiceMatchGrace(partner);
 
         await deletePendingFriendRequestsBetween(me, partner);
         await clearRandomCallStateForUser(me, "ended");
@@ -2960,6 +3099,8 @@ io.on("connection", (socket) => {
       removeFromQueue(to);
       lockUserSearch(me);
       lockUserSearch(to);
+      clearVoiceMatchGrace(me);
+      clearVoiceMatchGrace(to);
       createPendingRandomCall(me, to);
 
       const myProfile = await getFullUserProfile(me);
@@ -3008,6 +3149,8 @@ io.on("connection", (socket) => {
       pendingRandomCalls.delete(key);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
+      clearVoiceMatchGrace(pending.caller);
+      clearVoiceMatchGrace(pending.callee);
 
       activeRandomCalls.set(pending.caller, pending.callee);
       activeRandomCalls.set(pending.callee, pending.caller);
@@ -3055,6 +3198,8 @@ io.on("connection", (socket) => {
       pendingRandomCallByUser.delete(pending.callee);
       unlockUserSearch(pending.caller);
       unlockUserSearch(pending.callee);
+      clearVoiceMatchGrace(pending.caller);
+      clearVoiceMatchGrace(pending.callee);
 
       await emitToUser(from, "random_call_rejected", { by: me });
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
@@ -3156,6 +3301,15 @@ io.on("connection", (socket) => {
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
+
+    logInfo("DEBUG", "disconnect cleanup starting", {
+      user: me,
+      socketId: socket.id,
+      chatType: socket.data.chatType || null,
+      activePartner: me ? activeMatches.get(me) || null : null,
+      pendingKey: me ? pendingMatchByUser.get(me) || null : null,
+      locked: me ? isUserLocked(me) : false,
+    });
 
     if (me) {
       const preservedChatType = normalizeChatType(
