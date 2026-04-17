@@ -1,6 +1,3 @@
-// ==========================================
-// 1. استدعاء المكتبات وإعدادات البيئة
-// ==========================================
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
@@ -86,10 +83,6 @@ if (!DATABASE_URL) {
 mongoose.set("strictQuery", true);
 mongoose.set("bufferCommands", false);
 
-// ==========================================
-// 2. تعريف مخططات قاعدة البيانات
-// ==========================================
-
 const userSchema = new mongoose.Schema(
   {
     userId: {
@@ -154,9 +147,7 @@ const privateMessageSchema = new mongoose.Schema(
   {
     from: { type: String, required: true, trim: true, index: true },
     to: { type: String, required: true, trim: true, index: true },
-
     text: { type: String, default: "", trim: true },
-
     type: {
       type: String,
       enum: ["text", "image", "voice"],
@@ -166,11 +157,9 @@ const privateMessageSchema = new mongoose.Schema(
     image: { type: String, default: "" },
     audio: { type: String, default: "" },
     durationSeconds: { type: Number, default: 0 },
-
     imageUrl: { type: String, default: "" },
     voiceUrl: { type: String, default: "" },
     messageType: { type: String, default: "text" },
-
     time: { type: Date, default: Date.now, index: true },
     conversationKey: { type: String, required: true, index: true },
     readBy: { type: [String], default: [] },
@@ -204,9 +193,6 @@ const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
 const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
 
-// ==========================================
-// 3. إدارة الحالة في الذاكرة
-// ==========================================
 const socketToUser = new Map();
 const waitingQueues = {
   text: [],
@@ -235,22 +221,7 @@ const pendingRandomCallByUser = new Map();
 const voiceMatchGrace = new Map();
 const VOICE_MATCH_GRACE_MS = 20000;
 
-// ==========================================
-// 4. دوال مساعدة
-// ==========================================
-
-function logInfo(scope, message, extra = undefined) {
-  const prefix = `[${new Date().toISOString()}] [${scope.toUpperCase()}]`;
-  if (extra === undefined) {
-    console.log(`${prefix} ${message}`);
-  } else {
-    try {
-      console.log(`${prefix} ${message}`, JSON.stringify(extra, null, 2));
-    } catch {
-      console.log(`${prefix} ${message}`, extra);
-    }
-  }
-}
+function logInfo() {}
 
 function normalizeName(value) {
   if (!value) return "";
@@ -543,14 +514,6 @@ function removeFromQueue(userName, chatType = null) {
     }
   }
 
-  if (removed) {
-    logInfo("Queue", `User ${cleanName} removed from waiting list.`, {
-      chatType: chatType ? normalizeChatType(chatType) : "all",
-      textQueueSize: waitingQueues.text.length,
-      voiceQueueSize: waitingQueues.voice.length
-    });
-  }
-
   return removed;
 }
 
@@ -575,13 +538,6 @@ function addToQueue(userName, chatType = "text") {
   if (isUserInQueue(cleanName)) return false;
 
   getQueueByChatType(safeChatType).push(cleanName);
-
-  logInfo("Queue", `User ${cleanName} added to waiting list.`, {
-    chatType: safeChatType,
-    textQueueSize: waitingQueues.text.length,
-    voiceQueueSize: waitingQueues.voice.length
-  });
-
   return true;
 }
 
@@ -615,8 +571,7 @@ async function getUserSocket(userName) {
     }
 
     return socket || null;
-  } catch (err) {
-    logInfo("Critical", `Error in getUserSocket for ${userName}`, err);
+  } catch (_) {
     return null;
   }
 }
@@ -629,8 +584,7 @@ async function emitToUser(userName, event, payload) {
       return true;
     }
     return false;
-  } catch (err) {
-    logInfo("Socket", `Failed to emit ${event} to ${userName}`, err);
+  } catch (_) {
     return false;
   }
 }
@@ -663,8 +617,7 @@ async function getFullUserProfile(userName) {
       lastSeen: user.lastSeen,
       online: user.online
     };
-  } catch (err) {
-    logInfo("DB", `Error fetching profile for ${userName}`, err);
+  } catch (_) {
     return null;
   }
 }
@@ -709,8 +662,7 @@ async function resolveUserByAnyIdentifier(userName) {
     }
 
     return user || null;
-  } catch (err) {
-    logInfo("DB", `Error resolving user by identifier for ${userName}`, err);
+  } catch (_) {
     return null;
   }
 }
@@ -754,9 +706,7 @@ async function getUserStatusSummary(userName) {
             lastSeen: user.lastSeen || new Date()
           }
         }
-      ).catch((err) => {
-        logInfo("Status", `Failed to sync online state for ${canonicalId}`, err);
-      });
+      ).catch(() => {});
     }
 
     if (!isOnlineNow && user.online === true) {
@@ -774,9 +724,7 @@ async function getUserStatusSummary(userName) {
             lastSeen: user.lastSeen || new Date()
           }
         }
-      ).catch((err) => {
-        logInfo("Status", `Failed to sync offline state for ${canonicalId}`, err);
-      });
+      ).catch(() => {});
     }
 
     return {
@@ -789,8 +737,7 @@ async function getUserStatusSummary(userName) {
       online: isOnlineNow,
       lastSeen: user.lastSeen || null
     };
-  } catch (err) {
-    logInfo("DB", `Error fetching status summary for ${userName}`, err);
+  } catch (_) {
     const fallback = normalizeName(userName);
     const fallbackDisplay = normalizeDisplayName(userName) || fallback;
 
@@ -838,9 +785,7 @@ async function notifyFriendsStatusChanged(userName) {
         lastSeen: myStatus.lastSeen
       });
     }
-  } catch (err) {
-    logInfo("Status", `Failed to notify friends status change for ${userName}`, err);
-  }
+  } catch (_) {}
 }
 
 async function getFriendIdsForUser(userName) {
@@ -865,8 +810,7 @@ async function getFriendIdsForUser(userName) {
     }
 
     return [...new Set(ids)];
-  } catch (err) {
-    logInfo("DB", `Failed to get friend ids for ${userName}`, err);
+  } catch (_) {
     return [];
   }
 }
@@ -940,8 +884,7 @@ async function ensureUserRegistrationState(userName, socketId = null) {
     );
 
     return true;
-  } catch (err) {
-    logInfo("User", `Failed to ensure registration state for ${userName}`, err);
+  } catch (_) {
     return false;
   }
 }
@@ -973,8 +916,7 @@ async function validateUserReadyForMatchmaking(userName, socket) {
     }
 
     return { ok: true };
-  } catch (err) {
-    logInfo("Matchmaking", `Failed to validate user readiness for ${userName}`, err);
+  } catch (_) {
     return { ok: false, reason: "validation_failed" };
   }
 }
@@ -992,9 +934,7 @@ async function deletePendingFriendRequestsBetween(userA, userB) {
         { from: b, to: a }
       ]
     });
-  } catch (err) {
-    logInfo("FriendRequest", `Failed deleting pending requests between ${userA} and ${userB}`, err);
-  }
+  } catch (_) {}
 }
 
 function createPendingMatchEntry(userA, userB, chatType = "text") {
@@ -1029,9 +969,7 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
 
       await tryMatch(proposal.userA, proposal.chatType);
       await tryMatch(proposal.userB, proposal.chatType);
-    } catch (err) {
-      logInfo("Error", "Pending match timeout cleanup failed", err);
-    }
+    } catch (_) {}
   }, MATCH_PROPOSAL_TTL);
 
   pendingMatches.set(key, {
@@ -1065,9 +1003,7 @@ function createPendingCall(caller, callee) {
 
       await emitToUser(pending.caller, "call_ended", { reason: "no_answer" });
       await emitToUser(pending.callee, "call_ended", { reason: "no_answer" });
-    } catch (err) {
-      logInfo("Error", "Call timeout cleanup failed", err);
-    }
+    } catch (_) {}
   }, CALL_RING_TIMEOUT);
 
   pendingCalls.set(key, {
@@ -1105,9 +1041,7 @@ function createPendingRandomCall(caller, callee) {
       await emitToUser(pending.callee, "random_call_ended", {
         reason: "no_answer"
       });
-    } catch (err) {
-      logInfo("Error", "Random call timeout cleanup failed", err);
-    }
+    } catch (_) {}
   }, CALL_RING_TIMEOUT);
 
   pendingRandomCalls.set(key, {
@@ -1483,10 +1417,6 @@ function requestTwilioToken() {
     const tokenNormalized = normalizeSecretValue(TWILIO_AUTH_TOKEN);
 
     if (!sidNormalized || !tokenNormalized) {
-      logInfo("Twilio", "Twilio credentials are missing in runtime env", {
-        sidPresent: Boolean(sidNormalized),
-        tokenPresent: Boolean(tokenNormalized)
-      });
       return resolve({
         ok: true,
         iceServers: getFallbackIceServers(),
@@ -1495,10 +1425,6 @@ function requestTwilioToken() {
     }
 
     if (!sidNormalized.startsWith("AC")) {
-      logInfo("Twilio", "TWILIO_ACCOUNT_SID format is invalid for token API", {
-        expectedPrefix: "AC",
-        actualPrefix: sidNormalized.slice(0, 2)
-      });
       return resolve({
         ok: true,
         iceServers: getFallbackIceServers(),
@@ -1530,10 +1456,6 @@ function requestTwilioToken() {
 
       res.on("end", () => {
         if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          logInfo("Twilio", "Twilio token request returned non-success status", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
@@ -1552,21 +1474,12 @@ function requestTwilioToken() {
             });
           }
 
-          logInfo("Twilio", "Twilio response has no usable ice_servers", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
-
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
             provider: "fallback_stun",
           });
-        } catch (err) {
-          logInfo("Twilio", "Failed to parse Twilio token response", {
-            statusCode: res.statusCode,
-            bodyPreview: body.slice(0, 500)
-          });
+        } catch (_) {
           return resolve({
             ok: true,
             iceServers: getFallbackIceServers(),
@@ -1576,8 +1489,7 @@ function requestTwilioToken() {
       });
     });
 
-    req.on("error", (err) => {
-      logInfo("Twilio", "Twilio token request failed", err);
+    req.on("error", () => {
       return resolve({
         ok: true,
         iceServers: getFallbackIceServers(),
@@ -1590,9 +1502,12 @@ function requestTwilioToken() {
   });
 }
 
-// ==========================================
-// 5. منطق المطابقة
-// ==========================================
+function socketChatTypeFromUser(socket, userName) {
+  if (socket?.data?.chatType) {
+    return socket.data.chatType;
+  }
+  return getUserPreferredChatType(userName);
+}
 
 async function tryMatch(userName, requestedChatType = null) {
   const me = normalizeName(userName);
@@ -1620,12 +1535,6 @@ async function tryMatch(userName, requestedChatType = null) {
     );
 
     setUserPreferredChatType(me, chatType, mySocket);
-
-    logInfo("Matchmaking", `Trying to match user ${me}`, {
-      chatType,
-      textQueueSize: waitingQueues.text.length,
-      voiceQueueSize: waitingQueues.voice.length
-    });
 
     if (isUserInQueue(me)) {
       removeFromQueue(me, chatType);
@@ -1666,13 +1575,6 @@ async function tryMatch(userName, requestedChatType = null) {
         ) {
           partner = candidate;
           queue.splice(i, 1);
-
-          logInfo("Matchmaking", `Partner found`, {
-            userA: me,
-            userB: partner,
-            chatType
-          });
-
           break;
         }
 
@@ -1681,8 +1583,7 @@ async function tryMatch(userName, requestedChatType = null) {
 
         releaseMatchLock(candidate);
         lockedPartner = null;
-      } catch (candidateErr) {
-        logInfo("Matchmaking", `Candidate validation failed for ${candidate}`, candidateErr);
+      } catch (_) {
         releaseMatchLock(candidate);
         lockedPartner = null;
       }
@@ -1717,8 +1618,7 @@ async function tryMatch(userName, requestedChatType = null) {
         chatType
       });
     }
-  } catch (err) {
-    logInfo("Error", `Matchmaking failure for ${me}`, err);
+  } catch (_) {
   } finally {
     if (lockedPartner) {
       releaseMatchLock(lockedPartner);
@@ -1727,20 +1627,7 @@ async function tryMatch(userName, requestedChatType = null) {
   }
 }
 
-function socketChatTypeFromUser(socket, userName) {
-  if (socket?.data?.chatType) {
-    return socket.data.chatType;
-  }
-  return getUserPreferredChatType(userName);
-}
-
-// ==========================================
-// 6. أحداث السوكيت
-// ==========================================
-
 io.on("connection", (socket) => {
-  logInfo("Network", `Socket connected: ${socket.id}`);
-
   socket.on("register_user", async (rawName) => {
     try {
       const registration = parseRegistrationPayload(rawName);
@@ -1823,13 +1710,6 @@ io.on("connection", (socket) => {
         { upsert: true, returnDocument: "after" }
       );
 
-      logInfo("Auth", `User registered`, {
-        userName,
-        displayName,
-        chatType: preservedChatType,
-        socketId: socket.id
-      });
-
       socket.emit("registration_success", {
         userName: displayName,
         displayName,
@@ -1846,8 +1726,7 @@ io.on("connection", (socket) => {
       });
 
       await notifyFriendsStatusChanged(userName);
-    } catch (err) {
-      logInfo("Error", "Registration process failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Registration process failed" });
     }
   });
@@ -1895,8 +1774,7 @@ io.on("connection", (socket) => {
       });
 
       await notifyFriendsStatusChanged(me);
-    } catch (err) {
-      logInfo("Error", "Failed to update profile", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to update profile" });
     }
   });
@@ -1910,17 +1788,7 @@ io.on("connection", (socket) => {
         iceServers: result.iceServers,
         provider: result.provider,
       });
-
-      logInfo(
-        "Twilio",
-        `TURN credentials served to ${socket.data.userName || socket.id}`,
-        {
-          provider: result.provider,
-          count: result.iceServers.length,
-        }
-      );
-    } catch (err) {
-      logInfo("Twilio", "Failed to provide turn credentials", err);
+    } catch (_) {
       socket.emit("turn_credentials", {
         success: true,
         iceServers: getFallbackIceServers(),
@@ -1943,13 +1811,6 @@ io.on("connection", (socket) => {
       const chatType = normalizeChatType(payload?.chatType);
 
       setUserPreferredChatType(cleanMe, chatType, socket);
-
-      logInfo("Matchmaking", `find_partner received`, {
-        user: cleanMe,
-        requestedChatType: payload?.chatType,
-        normalizedChatType: chatType,
-        socketId: socket.id
-      });
 
       const activeSocketId = userToSocket.get(cleanMe);
       if (activeSocketId && activeSocketId !== socket.id) {
@@ -1975,8 +1836,7 @@ io.on("connection", (socket) => {
       }
 
       await tryMatch(me, chatType);
-    } catch (err) {
-      logInfo("Error", "find_partner failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to start search" });
     }
   });
@@ -2027,8 +1887,7 @@ io.on("connection", (socket) => {
         mode: "relationship_state",
         chatType: requestedChatType
       });
-    } catch (err) {
-      logInfo("Error", "stop_search failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to stop search" });
     }
   });
@@ -2058,8 +1917,7 @@ io.on("connection", (socket) => {
         mode: "leave_chat",
         chatType: requestedChatType
       });
-    } catch (err) {
-      logInfo("Error", "leave_chat failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to leave chat" });
     }
   });
@@ -2112,8 +1970,6 @@ io.on("connection", (socket) => {
         const profileA = await getFullUserProfile(proposal.userA);
         const profileB = await getFullUserProfile(proposal.userB);
 
-        const initiatorUser = proposal.userA;
-
         await emitToUser(proposal.userA, "match_confirmed", {
           partnerName: profileB?.userName || proposal.userB,
           partnerId: profileB?.userId || proposal.userB,
@@ -2126,7 +1982,7 @@ io.on("connection", (socket) => {
           online: profileB?.online === true,
           chatType: proposal.chatType,
           autoStartCall: isVoiceMatch,
-          isInitiator: isVoiceMatch ? proposal.userA === initiatorUser : false
+          isInitiator: isVoiceMatch ? true : false
         });
 
         await emitToUser(proposal.userB, "match_confirmed", {
@@ -2141,13 +1997,7 @@ io.on("connection", (socket) => {
           online: profileA?.online === true,
           chatType: proposal.chatType,
           autoStartCall: isVoiceMatch,
-          isInitiator: isVoiceMatch ? proposal.userB === initiatorUser : false
-        });
-
-        logInfo("Matchmaking", `Match confirmed`, {
-          userA: proposal.userA,
-          userB: proposal.userB,
-          chatType: proposal.chatType
+          isInitiator: false
         });
       } else {
         const meProfile = await getFullUserProfile(me);
@@ -2159,9 +2009,7 @@ io.on("connection", (socket) => {
           chatType: proposal.chatType
         });
       }
-    } catch (err) {
-      logInfo("Error", "accept_match failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("skip_partner", async (payload) => {
@@ -2236,9 +2084,7 @@ io.on("connection", (socket) => {
       }
 
       await tryMatch(me, myChatType);
-    } catch (err) {
-      logInfo("Error", "skip_partner failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("message", async (msgContent) => {
@@ -2260,9 +2106,7 @@ io.on("connection", (socket) => {
 
       await RandomChatMessage.create(msgData);
       await emitToUser(partner, "message", msgData);
-    } catch (err) {
-      logInfo("Error", "Random chat message failed to send", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("send_image", async (imgData) => {
@@ -2283,9 +2127,7 @@ io.on("connection", (socket) => {
       };
       await RandomChatMessage.create(data);
       await emitToUser(partner, "image_received", data);
-    } catch (err) {
-      logInfo("Error", "Image transmission failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("typing", async (isTyping) => {
@@ -2319,9 +2161,7 @@ io.on("connection", (socket) => {
       } else {
         userTypingTimeout.delete(key);
       }
-    } catch (err) {
-      logInfo("Error", "typing event failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("send_friend_request", async (targetName) => {
@@ -2393,8 +2233,7 @@ io.on("connection", (socket) => {
       } else {
         socket.emit("error_msg", { message: "Friend request already pending" });
       }
-    } catch (err) {
-      logInfo("Error", "Friend request system failure", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Friend request failed" });
     }
   });
@@ -2459,8 +2298,7 @@ io.on("connection", (socket) => {
         await request.save();
         await emitToUser(from, "friend_request_rejected", { by: me });
       }
-    } catch (err) {
-      logInfo("Error", "Friend response failed", err);
+    } catch (_) {
       socket.emit("error_msg", {
         message: "Failed to respond to friend request"
       });
@@ -2488,8 +2326,7 @@ io.on("connection", (socket) => {
           lastSeen: status.lastSeen
         });
       }
-    } catch (err) {
-      logInfo("Error", "Failed to get friends status", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to get friends status" });
     }
   });
@@ -2515,8 +2352,7 @@ io.on("connection", (socket) => {
           lastSeen: status.lastSeen
         });
       }
-    } catch (err) {
-      logInfo("Error", "Failed to get_my_friends_status", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to get friends status" });
     }
   });
@@ -2567,8 +2403,7 @@ io.on("connection", (socket) => {
 
       await forceRefreshUserSocketState(me);
       await forceRefreshUserSocketState(friendName);
-    } catch (err) {
-      logInfo("Error", "Delete friend failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to delete friend" });
     }
   });
@@ -2625,8 +2460,7 @@ io.on("connection", (socket) => {
       });
 
       socket.emit("private_history", normalizedMessages);
-    } catch (err) {
-      logInfo("Error", "Failed to load private history", err);
+    } catch (_) {
       socket.emit("private_history", []);
     }
   });
@@ -2650,9 +2484,7 @@ io.on("connection", (socket) => {
           $addToSet: { readBy: me }
         }
       );
-    } catch (err) {
-      logInfo("Error", "Failed to mark messages as read", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("private_typing", async (data) => {
@@ -2695,8 +2527,7 @@ io.on("connection", (socket) => {
               toId: to,
               isTyping: false
             });
-          } catch (err) {
-            logInfo("Typing", `Failed auto-stop typing for ${me} -> ${to}`, err);
+          } catch (_) {
           } finally {
             userTypingTimeout.delete(typingKey);
           }
@@ -2704,9 +2535,7 @@ io.on("connection", (socket) => {
 
         userTypingTimeout.set(typingKey, timeoutId);
       }
-    } catch (err) {
-      logInfo("Error", "private_typing failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("private_message", async (data) => {
@@ -2797,8 +2626,7 @@ io.on("connection", (socket) => {
         msgId: msg._id,
         delivered: delivered === true
       });
-    } catch (err) {
-      logInfo("Error", "Private message system failure", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Private message failed" });
     }
   });
@@ -2862,10 +2690,7 @@ io.on("connection", (socket) => {
 
       targetSocket.emit("incoming_call", incomingCallPayload);
       socket.emit("call_ringing", { to });
-
-      logInfo("Call", `Outgoing private call from ${me} to ${to}`);
-    } catch (err) {
-      logInfo("Error", "start_private_call failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to start call" });
     }
   });
@@ -2902,14 +2727,7 @@ io.on("connection", (socket) => {
       await emitToUser(pending.caller, "call_accepted", { by: pending.callee });
       await emitToUser(pending.caller, "call_connected", { with: pending.callee });
       await emitToUser(pending.callee, "call_connected", { with: pending.caller });
-
-      logInfo(
-        "Call",
-        `Private call connected between ${pending.caller} and ${pending.callee}`
-      );
-    } catch (err) {
-      logInfo("Error", "accept_private_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("reject_private_call", async (data) => {
@@ -2942,9 +2760,7 @@ io.on("connection", (socket) => {
 
       await emitToUser(from, "call_rejected", { by: me });
       await emitToUser(me, "call_ended", { reason: "rejected" });
-    } catch (err) {
-      logInfo("Error", "reject_private_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("end_private_call", async () => {
@@ -2953,9 +2769,7 @@ io.on("connection", (socket) => {
       if (!me) return;
 
       await clearCallStateForUser(me, "ended");
-    } catch (err) {
-      logInfo("Error", "end_private_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("webrtc_offer", async (data) => {
@@ -2977,8 +2791,7 @@ io.on("connection", (socket) => {
         sdp,
         type,
       });
-    } catch (err) {
-      logInfo("Error", "webrtc_offer failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay offer" });
     }
   });
@@ -3002,8 +2815,7 @@ io.on("connection", (socket) => {
         sdp,
         type,
       });
-    } catch (err) {
-      logInfo("Error", "webrtc_answer failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay answer" });
     }
   });
@@ -3025,8 +2837,7 @@ io.on("connection", (socket) => {
         from: me,
         candidate,
       });
-    } catch (err) {
-      logInfo("Error", "webrtc_ice_candidate failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
     }
   });
@@ -3088,12 +2899,7 @@ io.on("connection", (socket) => {
 
       targetSocket.emit("incoming_random_call", incomingCallPayload);
       socket.emit("random_call_ringing", { to });
-
-      logInfo("Call", `Outgoing random call from ${me} to ${to}`, {
-        chatType: "voice"
-      });
-    } catch (err) {
-      logInfo("Error", "start_random_call failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to start random call" });
     }
   });
@@ -3138,11 +2944,7 @@ io.on("connection", (socket) => {
       await emitToUser(pending.callee, "random_call_connected", {
         with: pending.caller
       });
-
-      logInfo("Call", `Random call connected between ${pending.caller} and ${pending.callee}`);
-    } catch (err) {
-      logInfo("Error", "accept_random_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("reject_random_call", async (data) => {
@@ -3177,9 +2979,7 @@ io.on("connection", (socket) => {
 
       await emitToUser(from, "random_call_rejected", { by: me });
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
-    } catch (err) {
-      logInfo("Error", "reject_random_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("end_random_call", async () => {
@@ -3188,9 +2988,7 @@ io.on("connection", (socket) => {
       if (!me) return;
 
       await clearRandomCallStateForUser(me, "ended");
-    } catch (err) {
-      logInfo("Error", "end_random_call failed", err);
-    }
+    } catch (_) {}
   });
 
   socket.on("random_webrtc_offer", async (data) => {
@@ -3214,8 +3012,7 @@ io.on("connection", (socket) => {
         sdp,
         type,
       });
-    } catch (err) {
-      logInfo("Error", "random_webrtc_offer failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay random offer" });
     }
   });
@@ -3241,8 +3038,7 @@ io.on("connection", (socket) => {
         sdp,
         type,
       });
-    } catch (err) {
-      logInfo("Error", "random_webrtc_answer failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay random answer" });
     }
   });
@@ -3266,15 +3062,13 @@ io.on("connection", (socket) => {
         from: me,
         candidate,
       });
-    } catch (err) {
-      logInfo("Error", "random_webrtc_ice_candidate failed", err);
+    } catch (_) {
       socket.emit("error_msg", { message: "Failed to relay random ICE candidate" });
     }
   });
 
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
-    logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
 
     if (me) {
       const preservedChatType = normalizeChatType(
@@ -3339,10 +3133,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// ==========================================
-// 7. API
-// ==========================================
-
 app.get("/", (req, res) => {
   res.send("Fadfad Master Server is running perfectly.");
 });
@@ -3373,27 +3163,16 @@ app.get("/health", async (req, res) => {
   });
 });
 
-// ==========================================
-// 8. تشغيل السيرفر
-// ==========================================
-
 async function startMasterServer() {
   try {
-    logInfo("System", "Initializing database connection...");
-
     await mongoose.connect(DATABASE_URL, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000
     });
 
-    logInfo("System", "Database connection established.");
-
-    server.listen(PORT, "0.0.0.0", () => {
-      logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
-      logInfo("System", "Ready to receive connections from Flutter app.");
-    });
+    server.listen(PORT, "0.0.0.0");
   } catch (err) {
-    logInfo("Critical", "Failed to start Master Server", err);
+    console.error("Failed to start Master Server", err);
     process.exit(1);
   }
 }
@@ -3401,9 +3180,9 @@ async function startMasterServer() {
 startMasterServer();
 
 process.on("unhandledRejection", (reason) => {
-  logInfo("Critical", "Unhandled Promise Rejection detected", reason);
+  console.error("Unhandled Promise Rejection detected", reason);
 });
 
 process.on("uncaughtException", (err) => {
-  logInfo("Critical", "Uncaught Exception detected! System remains stable.", err);
+  console.error("Uncaught Exception detected!", err);
 });
