@@ -220,6 +220,7 @@ const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
 const userTypingTimeout = new Map();
 const userSearchPreferences = new Map();
+const userSearchLocks = new Set();
 
 const userToSocket = new Map();
 const matchmakingLocks = new Set();
@@ -308,6 +309,24 @@ function setUserPreferredChatType(userName, chatType, socket = null) {
   }
 
   return safeChatType;
+}
+
+function lockUserSearch(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  userSearchLocks.add(cleanName);
+}
+
+function unlockUserSearch(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  userSearchLocks.delete(cleanName);
+}
+
+function isUserLocked(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
+  return userSearchLocks.has(cleanName);
 }
 
 function sanitizeText(value, maxLength = 2000) {
@@ -1046,6 +1065,8 @@ async function clearCallStateForUser(userName, reason = "ended") {
   if (activePartner) {
     activeCalls.delete(me);
     activeCalls.delete(activePartner);
+    unlockUserSearch(me);
+    unlockUserSearch(activePartner);
     await emitToUser(activePartner, "call_ended", { reason });
     await emitToUser(me, "call_ended", { reason });
   }
@@ -1063,12 +1084,17 @@ async function clearCallStateForUser(userName, reason = "ended") {
       pendingCalls.delete(pendingKey);
       pendingCallByUser.delete(pending.caller);
       pendingCallByUser.delete(pending.callee);
+      unlockUserSearch(me);
+      unlockUserSearch(other);
 
       await emitToUser(other, "call_ended", { reason });
       await emitToUser(me, "call_ended", { reason });
     } else {
       pendingCallByUser.delete(me);
+      unlockUserSearch(me);
     }
+  } else {
+    unlockUserSearch(me);
   }
 }
 
@@ -1080,6 +1106,8 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
   if (activePartner) {
     activeRandomCalls.delete(me);
     activeRandomCalls.delete(activePartner);
+    unlockUserSearch(me);
+    unlockUserSearch(activePartner);
     await emitToUser(activePartner, "random_call_ended", { reason });
     await emitToUser(me, "random_call_ended", { reason });
   }
@@ -1097,12 +1125,17 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       pendingRandomCalls.delete(pendingKey);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
+      unlockUserSearch(me);
+      unlockUserSearch(other);
 
       await emitToUser(other, "random_call_ended", { reason });
       await emitToUser(me, "random_call_ended", { reason });
     } else {
       pendingRandomCallByUser.delete(me);
+      unlockUserSearch(me);
     }
+  } else {
+    unlockUserSearch(me);
   }
 }
 
@@ -1123,7 +1156,9 @@ async function restartSearchForUser(userName) {
   if (
     activeMatches.has(cleanName) ||
     pendingMatchByUser.has(cleanName) ||
-    isUserInQueue(cleanName)
+    isUserInQueue(cleanName) ||
+    isUserBusyForCall(cleanName) ||
+    isUserLocked(cleanName)
   ) {
     return;
   }
@@ -1152,6 +1187,7 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
 
   if (wasInQueueOnly) {
     removeFromQueue(me, safeChatType);
+    unlockUserSearch(me);
     return;
   }
 
@@ -1161,6 +1197,8 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
   if (activePartner) {
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
+    unlockUserSearch(me);
+    unlockUserSearch(activePartner);
 
     await deletePendingFriendRequestsBetween(me, activePartner);
 
@@ -1191,6 +1229,8 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       pendingMatches.delete(pendingKey);
       pendingMatchByUser.delete(proposal.userA);
       pendingMatchByUser.delete(proposal.userB);
+      unlockUserSearch(proposal.userA);
+      unlockUserSearch(proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1206,8 +1246,13 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       }
     } else {
       pendingMatchByUser.delete(me);
+      unlockUserSearch(me);
     }
+
+    return;
   }
+
+  unlockUserSearch(me);
 }
 
 async function clearRelationshipRuntimeState(userA, userB) {
@@ -1217,6 +1262,8 @@ async function clearRelationshipRuntimeState(userA, userB) {
 
   removeFromQueue(a);
   removeFromQueue(b);
+  unlockUserSearch(a);
+  unlockUserSearch(b);
 
   await deletePendingFriendRequestsBetween(a, b);
 
@@ -1463,7 +1510,7 @@ async function tryMatch(userName, requestedChatType = null) {
       return;
     }
 
-    if (activeMatches.has(me) || pendingMatchByUser.has(me)) {
+    if (activeMatches.has(me) || pendingMatchByUser.has(me) || isUserBusyForCall(me) || isUserLocked(me)) {
       return;
     }
 
@@ -1514,7 +1561,9 @@ async function tryMatch(userName, requestedChatType = null) {
           partnerSocket &&
           candidateChatType === chatType &&
           !activeMatches.has(candidate) &&
-          !pendingMatchByUser.has(candidate)
+          !pendingMatchByUser.has(candidate) &&
+          !isUserBusyForCall(candidate) &&
+          !isUserLocked(candidate)
         ) {
           partner = candidate;
           queue.splice(i, 1);
@@ -1806,7 +1855,9 @@ io.on("connection", (socket) => {
       if (
         isUserInQueue(cleanMe) ||
         activeMatches.has(cleanMe) ||
-        pendingMatchByUser.has(cleanMe)
+        pendingMatchByUser.has(cleanMe) ||
+        isUserBusyForCall(cleanMe) ||
+        isUserLocked(cleanMe)
       ) {
         return;
       }
@@ -1845,6 +1896,7 @@ io.on("connection", (socket) => {
 
       if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
         removeFromQueue(cleanMe, requestedChatType);
+        unlockUserSearch(cleanMe);
 
         socket.emit("search_stopped", {
           success: true,
@@ -1856,6 +1908,8 @@ io.on("connection", (socket) => {
       }
 
       if (!hadPendingMatch && !hadActiveMatch) {
+        unlockUserSearch(cleanMe);
+
         socket.emit("search_stopped", {
           success: true,
           mode: "self_only",
@@ -1931,6 +1985,8 @@ io.on("connection", (socket) => {
 
         activeMatches.set(proposal.userA, proposal.userB);
         activeMatches.set(proposal.userB, proposal.userA);
+        lockUserSearch(proposal.userA);
+        lockUserSearch(proposal.userB);
 
         const profileA = await getFullUserProfile(proposal.userA);
         const profileB = await getFullUserProfile(proposal.userB);
@@ -2006,6 +2062,8 @@ io.on("connection", (socket) => {
           pendingMatches.delete(pendingKey);
           pendingMatchByUser.delete(me);
           pendingMatchByUser.delete(other);
+          unlockUserSearch(me);
+          unlockUserSearch(other);
 
           await deletePendingFriendRequestsBetween(me, other);
 
@@ -2030,6 +2088,8 @@ io.on("connection", (socket) => {
       if (partner) {
         activeMatches.delete(me);
         activeMatches.delete(partner);
+        unlockUserSearch(me);
+        unlockUserSearch(partner);
 
         await deletePendingFriendRequestsBetween(me, partner);
         await clearRandomCallStateForUser(me, "ended");
@@ -2637,6 +2697,8 @@ io.on("connection", (socket) => {
       }
 
       createPendingCall(me, to);
+      lockUserSearch(me);
+      lockUserSearch(to);
 
       const myProfile = await getFullUserProfile(me);
 
@@ -2744,6 +2806,8 @@ io.on("connection", (socket) => {
       pendingCalls.delete(key);
       pendingCallByUser.delete(pending.caller);
       pendingCallByUser.delete(pending.callee);
+      unlockUserSearch(pending.caller);
+      unlockUserSearch(pending.callee);
 
       await emitToUser(from, "call_rejected", { by: me });
       await emitToUser(me, "call_ended", { reason: "rejected" });
@@ -2874,6 +2938,10 @@ io.on("connection", (socket) => {
         return socket.emit("random_call_busy", { to });
       }
 
+      removeFromQueue(me);
+      removeFromQueue(to);
+      lockUserSearch(me);
+      lockUserSearch(to);
       createPendingRandomCall(me, to);
 
       const myProfile = await getFullUserProfile(me);
@@ -2967,6 +3035,8 @@ io.on("connection", (socket) => {
       pendingRandomCalls.delete(key);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
+      unlockUserSearch(pending.caller);
+      unlockUserSearch(pending.callee);
 
       await emitToUser(from, "random_call_rejected", { by: me });
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
