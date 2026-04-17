@@ -504,6 +504,23 @@ function addToQueue(userName, chatType = "text") {
   const cleanName = normalizeName(userName);
   const safeChatType = normalizeChatType(chatType);
 
+
+
+
+if (
+  activeMatches.has(cleanName) ||
+  pendingMatchByUser.has(cleanName) ||
+  isUserBusyForCall(cleanName) ||
+  isUserLocked(cleanName)
+) {
+  return false;
+}
+
+
+
+
+
+  
   if (!cleanName) return false;
   if (isUserInQueue(cleanName)) return false;
 
