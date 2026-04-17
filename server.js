@@ -361,11 +361,6 @@ function sanitizeText(value, maxLength = 2000) {
   return String(value).trim().slice(0, maxLength);
 }
 
-function sanitizeUrl(value, maxLength = 4000) {
-  if (!value) return "";
-  return String(value).trim().slice(0, maxLength);
-}
-
 function sanitizeOptionalString(value, maxLength = 300) {
   if (value === undefined || value === null) return "";
   return String(value).trim().slice(0, maxLength);
@@ -517,6 +512,15 @@ function isUserInVoiceTransition(userName) {
     return false;
   }
   return getUserPreferredChatType(cleanName) === "voice";
+}
+
+function isUserInDirectRandomVoiceCallFlow(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
+  return (
+    activeRandomCalls.has(cleanName) ||
+    pendingRandomCallByUser.has(cleanName)
+  );
 }
 
 function removeFromQueue(userName, chatType = null) {
@@ -1246,25 +1250,10 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
 
   const safeChatType = chatType ? normalizeChatType(chatType) : null;
 
-  logInfo("DEBUG", "clearUserBusyState called", {
-    user: me,
-    reason,
-    chatType: safeChatType,
-    activePartner: activeMatches.get(me) || null,
-    pendingKey: pendingMatchByUser.get(me) || null,
-    inQueue: isUserInQueue(me, safeChatType),
-    locked: isUserLocked(me),
-  });
-
   if (
     (reason === "left_chat" || reason === "partner_stopped_search") &&
-    isUserInVoiceTransition(me)
+    (isUserInVoiceTransition(me) || isUserInDirectRandomVoiceCallFlow(me))
   ) {
-    logInfo("DEBUG", "clearUserBusyState ignored during voice transition", {
-      user: me,
-      reason,
-      chatType: safeChatType,
-    });
     return;
   }
 
@@ -1283,12 +1272,6 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
 
   const activePartner = activeMatches.get(me);
   if (activePartner) {
-    logInfo("DEBUG", "clearUserBusyState clearing active match", {
-      user: me,
-      partner: activePartner,
-      reason,
-    });
-
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
     unlockUserSearch(me);
@@ -2060,18 +2043,10 @@ io.on("connection", (socket) => {
       );
       setUserPreferredChatType(me, requestedChatType, socket);
 
-      logInfo("DEBUG", "leave_chat received", {
-        user: me,
-        socketId: socket.id,
-        chatType: requestedChatType,
-      });
-
-      if (requestedChatType === "voice" && isUserInVoiceTransition(me)) {
-        logInfo("DEBUG", "leave_chat ignored during voice transition", {
-          user: me,
-          socketId: socket.id,
-          chatType: requestedChatType,
-        });
+      if (
+        requestedChatType === "voice" &&
+        (isUserInVoiceTransition(me) || isUserInDirectRandomVoiceCallFlow(me))
+      ) {
         return;
       }
 
@@ -2122,27 +2097,22 @@ io.on("connection", (socket) => {
         lockUserSearch(proposal.userA);
         lockUserSearch(proposal.userB);
 
-        if (proposal.chatType === "voice") {
-          setVoiceMatchGrace(proposal.userA);
-          setVoiceMatchGrace(proposal.userB);
+        const isVoiceMatch = proposal.chatType === "voice";
+
+        if (isVoiceMatch) {
+          activeRandomCalls.set(proposal.userA, proposal.userB);
+          activeRandomCalls.set(proposal.userB, proposal.userA);
+          clearVoiceMatchGrace(proposal.userA);
+          clearVoiceMatchGrace(proposal.userB);
         } else {
           clearVoiceMatchGrace(proposal.userA);
           clearVoiceMatchGrace(proposal.userB);
         }
 
-        logInfo("DEBUG", "match state stored", {
-          userA: proposal.userA,
-          userB: proposal.userB,
-          activeA: activeMatches.get(proposal.userA),
-          activeB: activeMatches.get(proposal.userB),
-          lockedA: isUserLocked(proposal.userA),
-          lockedB: isUserLocked(proposal.userB),
-          graceA: hasVoiceMatchGrace(proposal.userA),
-          graceB: hasVoiceMatchGrace(proposal.userB),
-        });
-
         const profileA = await getFullUserProfile(proposal.userA);
         const profileB = await getFullUserProfile(proposal.userB);
+
+        const initiatorUser = proposal.userA;
 
         await emitToUser(proposal.userA, "match_confirmed", {
           partnerName: profileB?.userName || proposal.userB,
@@ -2154,7 +2124,9 @@ io.on("connection", (socket) => {
           profileImage: profileB?.profileImage ?? "",
           lastSeen: profileB?.lastSeen ?? null,
           online: profileB?.online === true,
-          chatType: proposal.chatType
+          chatType: proposal.chatType,
+          autoStartCall: isVoiceMatch,
+          isInitiator: isVoiceMatch ? proposal.userA === initiatorUser : false
         });
 
         await emitToUser(proposal.userB, "match_confirmed", {
@@ -2167,7 +2139,9 @@ io.on("connection", (socket) => {
           profileImage: profileA?.profileImage ?? "",
           lastSeen: profileA?.lastSeen ?? null,
           online: profileA?.online === true,
-          chatType: proposal.chatType
+          chatType: proposal.chatType,
+          autoStartCall: isVoiceMatch,
+          isInitiator: isVoiceMatch ? proposal.userB === initiatorUser : false
         });
 
         logInfo("Matchmaking", `Match confirmed`, {
@@ -3301,15 +3275,6 @@ io.on("connection", (socket) => {
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
-
-    logInfo("DEBUG", "disconnect cleanup starting", {
-      user: me,
-      socketId: socket.id,
-      chatType: socket.data.chatType || null,
-      activePartner: me ? activeMatches.get(me) || null : null,
-      pendingKey: me ? pendingMatchByUser.get(me) || null : null,
-      locked: me ? isUserLocked(me) : false,
-    });
 
     if (me) {
       const preservedChatType = normalizeChatType(
