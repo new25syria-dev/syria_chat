@@ -155,10 +155,8 @@ const privateMessageSchema = new mongoose.Schema(
     from: { type: String, required: true, trim: true, index: true },
     to: { type: String, required: true, trim: true, index: true },
 
-    // نص
     text: { type: String, default: "", trim: true },
 
-    // الحقول الجديدة المستخدمة فعليًا في Flutter
     type: {
       type: String,
       enum: ["text", "image", "voice"],
@@ -169,7 +167,6 @@ const privateMessageSchema = new mongoose.Schema(
     audio: { type: String, default: "" },
     durationSeconds: { type: Number, default: 0 },
 
-    // الحقول القديمة للإبقاء على التوافق
     imageUrl: { type: String, default: "" },
     voiceUrl: { type: String, default: "" },
     messageType: { type: String, default: "text" },
@@ -325,6 +322,7 @@ function unlockUserSearch(userName) {
 
 function isUserLocked(userName) {
   const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
   return userSearchLocks.has(cleanName);
 }
 
@@ -458,6 +456,28 @@ function getAllQueueSizes() {
   return Object.values(waitingQueues).reduce((sum, queue) => sum + queue.length, 0);
 }
 
+function isUserBusyForCall(userName) {
+  const cleanName = normalizeName(userName);
+  return (
+    activeCalls.has(cleanName) ||
+    pendingCallByUser.has(cleanName) ||
+    activeRandomCalls.has(cleanName) ||
+    pendingRandomCallByUser.has(cleanName)
+  );
+}
+
+function isUserUnavailableForMatch(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return true;
+
+  return (
+    activeMatches.has(cleanName) ||
+    pendingMatchByUser.has(cleanName) ||
+    isUserBusyForCall(cleanName) ||
+    isUserLocked(cleanName)
+  );
+}
+
 function removeFromQueue(userName, chatType = null) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
@@ -504,24 +524,8 @@ function addToQueue(userName, chatType = "text") {
   const cleanName = normalizeName(userName);
   const safeChatType = normalizeChatType(chatType);
 
-
-
-
-if (
-  activeMatches.has(cleanName) ||
-  pendingMatchByUser.has(cleanName) ||
-  isUserBusyForCall(cleanName) ||
-  isUserLocked(cleanName)
-) {
-  return false;
-}
-
-
-
-
-
-  
   if (!cleanName) return false;
+  if (isUserUnavailableForMatch(cleanName)) return false;
   if (isUserInQueue(cleanName)) return false;
 
   getQueueByChatType(safeChatType).push(cleanName);
@@ -997,16 +1001,6 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
   return key;
 }
 
-function isUserBusyForCall(userName) {
-  const cleanName = normalizeName(userName);
-  return (
-    activeCalls.has(cleanName) ||
-    pendingCallByUser.has(cleanName) ||
-    activeRandomCalls.has(cleanName) ||
-    pendingRandomCallByUser.has(cleanName)
-  );
-}
-
 function createPendingCall(caller, callee) {
   const key = pairKey(caller, callee);
 
@@ -1176,11 +1170,8 @@ async function restartSearchForUser(userName) {
   if (!cleanName) return;
 
   if (
-    activeMatches.has(cleanName) ||
-    pendingMatchByUser.has(cleanName) ||
-    isUserInQueue(cleanName) ||
-    isUserBusyForCall(cleanName) ||
-    isUserLocked(cleanName)
+    isUserUnavailableForMatch(cleanName) ||
+    isUserInQueue(cleanName)
   ) {
     return;
   }
@@ -1541,7 +1532,7 @@ async function tryMatch(userName, requestedChatType = null) {
       return;
     }
 
-    if (activeMatches.has(me) || pendingMatchByUser.has(me) || isUserBusyForCall(me) || isUserLocked(me)) {
+    if (isUserUnavailableForMatch(me)) {
       return;
     }
 
@@ -1591,10 +1582,7 @@ async function tryMatch(userName, requestedChatType = null) {
         if (
           partnerSocket &&
           candidateChatType === chatType &&
-          !activeMatches.has(candidate) &&
-          !pendingMatchByUser.has(candidate) &&
-          !isUserBusyForCall(candidate) &&
-          !isUserLocked(candidate)
+          !isUserUnavailableForMatch(candidate)
         ) {
           partner = candidate;
           queue.splice(i, 1);
@@ -1883,13 +1871,12 @@ io.on("connection", (socket) => {
         socketId: socket.id
       });
 
-      if (
-        isUserInQueue(cleanMe) ||
-        activeMatches.has(cleanMe) ||
-        pendingMatchByUser.has(cleanMe) ||
-        isUserBusyForCall(cleanMe) ||
-        isUserLocked(cleanMe)
-      ) {
+      const activeSocketId = userToSocket.get(cleanMe);
+      if (activeSocketId && activeSocketId !== socket.id) {
+        return;
+      }
+
+      if (isUserInQueue(cleanMe) || isUserUnavailableForMatch(cleanMe)) {
         return;
       }
 
