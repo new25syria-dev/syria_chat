@@ -2144,8 +2144,6 @@ io.on("connection", (socket) => {
         const profileA = await getFullUserProfile(proposal.userA);
         const profileB = await getFullUserProfile(proposal.userB);
 
-               const isVoiceMatch = proposal.chatType === "voice";
-
         await emitToUser(proposal.userA, "match_confirmed", {
           partnerName: profileB?.userName || proposal.userB,
           partnerId: profileB?.userId || proposal.userB,
@@ -2156,9 +2154,7 @@ io.on("connection", (socket) => {
           profileImage: profileB?.profileImage ?? "",
           lastSeen: profileB?.lastSeen ?? null,
           online: profileB?.online === true,
-          chatType: proposal.chatType,
-          autoStartCall: isVoiceMatch,
-          isInitiator: isVoiceMatch ? true : false
+          chatType: proposal.chatType
         });
 
         await emitToUser(proposal.userB, "match_confirmed", {
@@ -2171,17 +2167,29 @@ io.on("connection", (socket) => {
           profileImage: profileA?.profileImage ?? "",
           lastSeen: profileA?.lastSeen ?? null,
           online: profileA?.online === true,
-          chatType: proposal.chatType,
-          autoStartCall: isVoiceMatch,
-          isInitiator: isVoiceMatch ? false : false
+          chatType: proposal.chatType
         });
 
         logInfo("Matchmaking", `Match confirmed`, {
           userA: proposal.userA,
           userB: proposal.userB,
-          chatType: proposal.chatType,
-          autoStartCall: isVoiceMatch
+          chatType: proposal.chatType
         });
+      } else {
+        const meProfile = await getFullUserProfile(me);
+        await emitToUser(partner, "partner_accepted", {
+          message: "Partner is ready",
+          partnerName: meProfile?.userName || me,
+          partnerId: meProfile?.userId || me,
+          profileImage: meProfile?.profileImage || "",
+          chatType: proposal.chatType
+        });
+      }
+    } catch (err) {
+      logInfo("Error", "accept_match failed", err);
+    }
+  });
+
   socket.on("skip_partner", async (payload) => {
     try {
       const me = socket.data.userName;
