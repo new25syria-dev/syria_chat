@@ -90,15 +90,7 @@ mongoose.set("bufferCommands", false);
 // 2. تعريف مخططات قاعدة البيانات
 // ==========================================
 
-
- const banSchema = new mongoose.Schema({
-  userId: { type: String, index: true },
-  deviceId: { type: String, index: true },
-  reason: { type: String, default: "" },
-  bannedAt: { type: Date, default: Date.now }
-});
-
-const Ban = mongoose.model("Ban", banSchema); 
+const userSchema = new mongoose.Schema(
   {
     userId: {
       type: String,
@@ -213,11 +205,23 @@ const randomChatMessageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// ✅ جدول الحظر
+const banSchema = new mongoose.Schema(
+  {
+    userId: { type: String, default: "", trim: true, index: true },
+    deviceId: { type: String, default: "", trim: true, index: true },
+    reason: { type: String, default: "", trim: true },
+    bannedAt: { type: Date, default: Date.now }
+  },
+  { timestamps: true }
+);
+
 const User = mongoose.model("User", userSchema);
 const Friendship = mongoose.model("Friendship", friendshipSchema);
 const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
 const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
+const Ban = mongoose.model("Ban", banSchema);
 
 // ==========================================
 // 3. إدارة الحالة في الذاكرة
@@ -373,11 +377,6 @@ function hasVoiceMatchGrace(userName) {
 
 function sanitizeText(value, maxLength = 2000) {
   if (value === undefined || value === null) return "";
-  return String(value).trim().slice(0, maxLength);
-}
-
-function sanitizeUrl(value, maxLength = 4000) {
-  if (!value) return "";
   return String(value).trim().slice(0, maxLength);
 }
 
@@ -1792,6 +1791,21 @@ io.on("connection", (socket) => {
       const userName = buildStableUserId(cleanClientId);
       if (!userName) {
         socket.emit("error_msg", { message: "Invalid user identity" });
+        return;
+      }
+
+      // ✅ فحص الحظر قبل التسجيل
+      const bannedRecord = await Ban.findOne({
+        $or: [
+          { userId: userName },
+          { deviceId: cleanClientId }
+        ]
+      }).lean();
+
+      if (bannedRecord) {
+        socket.emit("error_msg", {
+          message: bannedRecord.reason || "تم حظرك من التطبيق"
+        });
         return;
       }
 
