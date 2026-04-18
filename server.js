@@ -2201,28 +2201,37 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("leave_chat", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+socket.on("leave_chat", async (payload) => {
+  try {
+    const me = socket.data.userName;
+    if (!me) return;
 
-      const requestedChatType = normalizeChatType(
-        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-      );
-      setUserPreferredChatType(me, requestedChatType, socket);
+    const requestedChatType = normalizeChatType(
+      payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
+    );
+    setUserPreferredChatType(me, requestedChatType, socket);
 
-      logInfo("DEBUG", "leave_chat received", {
-        user: me,
-        socketId: socket.id,
-        chatType: requestedChatType,
-      });
+    logInfo("DEBUG", "leave_chat FORCE executed", {
+      user: me,
+      socketId: socket.id,
+      chatType: requestedChatType,
+    });
 
-     // ALWAYS allow leave_chat (حتى في voice)
-logInfo("DEBUG", "leave_chat FORCE executed", {
-  user: me,
-  socketId: socket.id,
-  chatType: requestedChatType,
-});
+    // ❌ حذف شرط voice transition بالكامل
+
+    await clearUserBusyState(me, "left_chat", requestedChatType);
+    await clearRandomCallStateForUser(me, "left_chat");
+
+    socket.emit("search_stopped", {
+      success: true,
+      mode: "leave_chat",
+      chatType: requestedChatType
+    });
+  } catch (err) {
+    logInfo("Error", "leave_chat failed", err);
+    socket.emit("error_msg", { message: "Failed to leave chat" });
+  }
+}); 
 
 await clearUserBusyState(me, "left_chat", requestedChatType);
 await clearRandomCallStateForUser(me, "left_chat");
