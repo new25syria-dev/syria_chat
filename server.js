@@ -1257,17 +1257,7 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
     locked: isUserLocked(me),
   });
 
-  if (
-    (reason === "left_chat" || reason === "partner_stopped_search") &&
-    isUserInVoiceTransition(me)
-  ) {
-    logInfo("DEBUG", "clearUserBusyState ignored during voice transition", {
-      user: me,
-      reason,
-      chatType: safeChatType,
-    });
-    return;
-  }
+  // ❌ تم حذف منطق voice transition بالكامل (كان يمنع الخروج)
 
   const wasInQueueOnly =
     isUserInQueue(me, safeChatType) &&
@@ -1290,6 +1280,68 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       reason,
     });
 
+    activeMatches.delete(me);
+    activeMatches.delete(activePartner);
+    unlockUserSearch(me);
+    unlockUserSearch(activePartner);
+    clearVoiceMatchGrace(me);
+    clearVoiceMatchGrace(activePartner);
+
+    await deletePendingFriendRequestsBetween(me, activePartner);
+
+    await emitToUser(activePartner, "match_closed", { reason });
+
+    // ✅ تم حذف left_chat من إعادة البحث
+    if (
+      reason === "partner_stopped_search" ||
+      reason === "partner_left" ||
+      reason === "partner_disconnected"
+    ) {
+      await restartSearchForUser(activePartner);
+    }
+
+    return;
+  }
+
+  const pendingKey = pendingMatchByUser.get(me);
+  if (pendingKey) {
+    const proposal = pendingMatches.get(pendingKey);
+    if (proposal) {
+      if (proposal.timeoutId) {
+        clearTimeout(proposal.timeoutId);
+      }
+
+      const other = proposal.userA === me ? proposal.userB : proposal.userA;
+
+      pendingMatches.delete(pendingKey);
+      pendingMatchByUser.delete(proposal.userA);
+      pendingMatchByUser.delete(proposal.userB);
+      unlockUserSearch(proposal.userA);
+      unlockUserSearch(proposal.userB);
+      clearVoiceMatchGrace(proposal.userA);
+      clearVoiceMatchGrace(proposal.userB);
+
+      await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
+
+      await emitToUser(other, "match_cancelled", { reason });
+
+      if (
+        reason === "partner_stopped_search" ||
+        reason === "partner_left" ||
+        reason === "partner_disconnected"
+      ) {
+        await restartSearchForUser(other);
+      }
+    } else {
+      pendingMatchByUser.delete(me);
+      unlockUserSearch(me);
+      clearVoiceMatchGrace(me);
+    }
+    return;
+  }
+
+  unlockUserSearch(me);
+}
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
     unlockUserSearch(me);
