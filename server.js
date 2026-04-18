@@ -10,7 +10,7 @@ const http = require("http");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
-
+const MAX_REPORTS = 3;
 const envCandidates = [
   ".env",
   ".nenv",
@@ -222,7 +222,18 @@ const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
 const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
 const Ban = mongoose.model("Ban", banSchema);
+const reportSchema = new mongoose.Schema(
+  {
+    reporter: { type: String, required: true },
+    reported: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+  },
+  { timestamps: true }
+);
 
+reportSchema.index({ reporter: 1, reported: 1 }, { unique: true });
+
+const Report = mongoose.model("Report", reportSchema);
 // ==========================================
 // 3. إدارة الحالة في الذاكرة
 // ==========================================
@@ -1551,7 +1562,59 @@ function requestTwilioToken() {
         "Content-Length": Buffer.byteLength(postData),
       },
     };
+app.post("/report-user", async (req, res) => {
+  try {
+    const { reporterId, reportedUserId } = req.body;
 
+    const reporter = normalizeName(reporterId);
+    const reported = normalizeName(reportedUserId);
+
+    if (!reporter || !reported || reporter === reported) {
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    const exists = await Report.findOne({
+      reporter,
+      reported
+    });
+
+    if (exists) {
+      return res.json({ success: false, message: "Already reported" });
+    }
+
+    await Report.create({ reporter, reported });
+
+    const user = await User.findOneAndUpdate(
+      {
+        $or: [
+          { userName: reported },
+          { userId: reported }
+        ]
+      },
+      {
+        $inc: { reports: 1 }
+      },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (user.reports >= MAX_REPORTS) {
+      await banUserNow(reported, "Too many reports");
+    }
+
+    return res.json({
+      success: true,
+      reports: user.reports
+    });
+
+  } catch (err) {
+    logInfo("ERROR", "Report system failed", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
     const req = https.request(options, (res) => {
       let body = "";
 
@@ -1620,7 +1683,31 @@ function requestTwilioToken() {
     req.end();
   });
 }
+async function banUserNow(userName, reason = "Too many reports") {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
 
+  await User.findOneAndUpdate(
+    {
+      $or: [
+        { userName: cleanName },
+        { userId: cleanName }
+      ]
+    },
+    {
+      $set: { isBanned: true }
+    }
+  );
+
+  const socket = await getUserSocket(cleanName);
+
+  if (socket) {
+    socket.emit("banned", { message: reason });
+    socket.disconnect(true);
+  }
+
+  logInfo("BAN", `User banned: ${cleanName}`, { reason });
+}
 // ==========================================
 // 5. منطق المطابقة
 // ==========================================
