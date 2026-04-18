@@ -11,7 +11,10 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 
-const MAX_REPORTS = 3;
+const REPORT_BAN_24H_THRESHOLD = 3;
+const REPORT_BAN_7D_THRESHOLD = 5;
+const TEMP_BAN_24H_MS = 24 * 60 * 60 * 1000;
+const TEMP_BAN_7D_MS = 7 * 24 * 60 * 60 * 1000;
 
 const envCandidates = [
   ".env",
@@ -127,7 +130,12 @@ const userSchema = new mongoose.Schema(
     bio: { type: String, default: "" },
     gender: { type: String, default: "unspecified" },
     fcmToken: { type: String, default: "" },
+
     isBanned: { type: Boolean, default: false },
+    banExpiresAt: { type: Date, default: null },
+    banReason: { type: String, default: "" },
+    banLevel: { type: Number, default: 0 },
+
     reports: { type: Number, default: 0 },
   },
   { timestamps: true }
@@ -212,7 +220,10 @@ const banSchema = new mongoose.Schema(
     userId: { type: String, default: "", trim: true, index: true },
     deviceId: { type: String, default: "", trim: true, index: true },
     reason: { type: String, default: "", trim: true },
-    bannedAt: { type: Date, default: Date.now }
+    level: { type: Number, default: 0 },
+    bannedAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, default: null, index: true },
+    active: { type: Boolean, default: true, index: true }
   },
   { timestamps: true }
 );
@@ -608,6 +619,173 @@ function addToQueue(userName, chatType = "text") {
   return true;
 }
 
+function getBanConfigForReports(reports) {
+  const safeReports = Number(reports) || 0;
+
+  if (safeReports >= REPORT_BAN_7D_THRESHOLD) {
+    return {
+      level: 2,
+      durationMs: TEMP_BAN_7D_MS,
+      reason: "تم حظرك مؤقتًا لمدة 7 أيام بسبب كثرة البلاغات"
+    };
+  }
+
+  if (safeReports >= REPORT_BAN_24H_THRESHOLD) {
+    return {
+      level: 1,
+      durationMs: TEMP_BAN_24H_MS,
+      reason: "تم حظرك مؤقتًا لمدة 24 ساعة بسبب كثرة البلاغات"
+    };
+  }
+
+  return null;
+}
+
+function buildBanPayload(banLike) {
+  const expiresAtDate = banLike?.expiresAt ? new Date(banLike.expiresAt) : null;
+  const remainingMs = expiresAtDate ? Math.max(0, expiresAtDate.getTime() - Date.now()) : 0;
+
+  return {
+    isBanned: true,
+    reason: banLike?.reason || "تم حظرك مؤقتًا",
+    level: Number(banLike?.level || 0),
+    expiresAt: expiresAtDate ? expiresAtDate.toISOString() : null,
+    remainingMs
+  };
+}
+
+async function clearExpiredBanState(userDoc) {
+  try {
+    if (!userDoc) return;
+
+    const now = new Date();
+    const hasExpiredUserBan =
+      userDoc.isBanned === true &&
+      userDoc.banExpiresAt &&
+      new Date(userDoc.banExpiresAt).getTime() <= now.getTime();
+
+    if (hasExpiredUserBan) {
+      await User.updateOne(
+        { _id: userDoc._id },
+        {
+          $set: {
+            isBanned: false,
+            banReason: "",
+            banLevel: 0
+          },
+          $unset: {
+            banExpiresAt: 1
+          }
+        }
+      );
+    }
+
+    const orConditions = [];
+    if (userDoc.userId) orConditions.push({ userId: userDoc.userId });
+    if (userDoc.deviceId) orConditions.push({ deviceId: userDoc.deviceId });
+
+    if (orConditions.length > 0) {
+      await Ban.updateMany(
+        {
+          active: true,
+          expiresAt: { $lte: now },
+          $or: orConditions
+        },
+        {
+          $set: { active: false }
+        }
+      );
+    }
+  } catch (err) {
+    logInfo("BAN", "Failed clearing expired ban state", err);
+  }
+}
+
+async function getActiveBanState({ userName = "", deviceId = "" } = {}) {
+  try {
+    const cleanUserName = normalizeName(userName);
+    const cleanDeviceId = normalizeClientId(deviceId);
+    const now = new Date();
+
+    let userDoc = null;
+
+    if (cleanUserName) {
+      userDoc = await User.findOne({
+        $or: [
+          { userName: cleanUserName },
+          { userId: cleanUserName }
+        ]
+      })
+        .select("_id userId userName deviceId isBanned banExpiresAt banReason banLevel")
+        .lean();
+    }
+
+    if (userDoc?.isBanned === true && userDoc?.banExpiresAt) {
+      const userBanExpires = new Date(userDoc.banExpiresAt);
+      if (userBanExpires.getTime() > now.getTime()) {
+        return buildBanPayload({
+          reason: userDoc.banReason,
+          level: userDoc.banLevel,
+          expiresAt: userBanExpires
+        });
+      }
+
+      await clearExpiredBanState(userDoc);
+    }
+
+    const orConditions = [];
+    if (cleanUserName) orConditions.push({ userId: cleanUserName });
+    if (cleanDeviceId) orConditions.push({ deviceId: cleanDeviceId });
+
+    if (orConditions.length === 0) {
+      return null;
+    }
+
+    const activeBan = await Ban.findOne({
+      active: true,
+      expiresAt: { $gt: now },
+      $or: orConditions
+    })
+      .sort({ expiresAt: -1, createdAt: -1 })
+      .lean();
+
+    if (activeBan) {
+      return buildBanPayload(activeBan);
+    }
+
+    await Ban.updateMany(
+      {
+        active: true,
+        expiresAt: { $lte: now },
+        $or: orConditions
+      },
+      {
+        $set: { active: false }
+      }
+    );
+
+    return null;
+  } catch (err) {
+    logInfo("BAN", "Failed to get active ban state", err);
+    return null;
+  }
+}
+
+async function emitBanAndDisconnect(socket, banPayload) {
+  if (!socket) return;
+
+  socket.emit("banned", banPayload);
+  socket.emit("ban_status", banPayload);
+
+  setTimeout(() => {
+    try {
+      socket.disconnect(true);
+    } catch (err) {
+      logInfo("BAN", "Failed disconnecting banned socket", err);
+    }
+  }, 150);
+}
+
 async function getUserSocket(userName) {
   try {
     const cleanName = normalizeName(userName);
@@ -980,15 +1158,26 @@ async function validateUserReadyForMatchmaking(userName, socket) {
         { userName: me },
         { userId: me }
       ]
-    }).select("socketId online isBanned").lean();
+    })
+      .select("socketId online isBanned banExpiresAt deviceId banReason banLevel")
+      .lean();
 
     if (!dbUser) {
       await ensureUserRegistrationState(me, socket.id);
       return { ok: true };
     }
 
-    if (dbUser.isBanned === true) {
-      return { ok: false, reason: "banned" };
+    const activeBan = await getActiveBanState({
+      userName: me,
+      deviceId: dbUser.deviceId || socket.data.deviceId
+    });
+
+    if (activeBan) {
+      return {
+        ok: false,
+        reason: "banned",
+        ban: activeBan
+      };
     }
 
     if (dbUser.socketId !== socket.id || dbUser.online !== true) {
@@ -1634,9 +1823,12 @@ function requestTwilioToken() {
   });
 }
 
-async function banUserNow(userName, reason = "Too many reports") {
+async function banUserNow(userName, reason, durationMs, level = 1) {
   const cleanName = normalizeName(userName);
-  if (!cleanName) return;
+  if (!cleanName || !durationMs) return null;
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + durationMs);
 
   const user = await User.findOneAndUpdate(
     {
@@ -1646,37 +1838,60 @@ async function banUserNow(userName, reason = "Too many reports") {
       ]
     },
     {
-      $set: { isBanned: true }
+      $set: {
+        isBanned: true,
+        banReason: reason,
+        banLevel: level,
+        banExpiresAt: expiresAt
+      }
     },
     { returnDocument: "after" }
   ).lean();
 
   if (user) {
-    const existingBan = await Ban.findOne({
-      $or: [
-        { userId: cleanName },
-        ...(user.deviceId ? [{ deviceId: user.deviceId }] : [])
-      ]
-    }).lean();
-
-    if (!existingBan) {
-      await Ban.create({
-        userId: cleanName,
-        deviceId: user.deviceId || "",
-        reason,
-        bannedAt: new Date()
-      });
-    }
+    await Ban.findOneAndUpdate(
+      {
+        $or: [
+          { userId: cleanName },
+          ...(user.deviceId ? [{ deviceId: user.deviceId }] : [])
+        ]
+      },
+      {
+        $set: {
+          userId: cleanName,
+          deviceId: user.deviceId || "",
+          reason,
+          level,
+          bannedAt: now,
+          expiresAt,
+          active: true
+        }
+      },
+      {
+        upsert: true,
+        returnDocument: "after"
+      }
+    );
   }
+
+  const payload = buildBanPayload({
+    reason,
+    level,
+    expiresAt
+  });
 
   const socket = await getUserSocket(cleanName);
-
   if (socket) {
-    socket.emit("banned", { message: reason });
-    socket.disconnect(true);
+    await emitBanAndDisconnect(socket, payload);
   }
 
-  logInfo("BAN", `User banned: ${cleanName}`, { reason });
+  logInfo("BAN", `User temp banned: ${cleanName}`, {
+    reason,
+    level,
+    expiresAt: expiresAt.toISOString()
+  });
+
+  return payload;
 }
 
 async function processUserReport(reporterId, reportedUserId) {
@@ -1715,14 +1930,23 @@ async function processUserReport(reporterId, reportedUserId) {
     return { success: false, message: "User not found" };
   }
 
-  if (user.reports >= MAX_REPORTS) {
-    await banUserNow(reported, "Too many reports");
+  let banInfo = null;
+  const banConfig = getBanConfigForReports(user.reports);
+
+  if (banConfig) {
+    banInfo = await banUserNow(
+      reported,
+      banConfig.reason,
+      banConfig.durationMs,
+      banConfig.level
+    );
   }
 
   return {
     success: true,
     reports: user.reports,
-    reportedUserId: reported
+    reportedUserId: reported,
+    ban: banInfo
   };
 }
 
@@ -1744,6 +1968,16 @@ async function tryMatch(userName, requestedChatType = null) {
     const mySocket = await getUserSocket(me);
     if (!mySocket) {
       await emitToUser(me, "error_msg", { message: "User is not fully connected yet" });
+      return;
+    }
+
+    const activeBan = await getActiveBanState({
+      userName: me,
+      deviceId: mySocket.data?.deviceId
+    });
+
+    if (activeBan) {
+      await emitBanAndDisconnect(mySocket, activeBan);
       return;
     }
 
@@ -1899,17 +2133,18 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const bannedRecord = await Ban.findOne({
-        $or: [
-          { userId: userName },
-          { deviceId: cleanClientId }
-        ]
-      }).lean();
+      const activeBan = await getActiveBanState({
+        userName,
+        deviceId: cleanClientId
+      });
 
-      if (bannedRecord) {
-        socket.emit("error_msg", {
-          message: bannedRecord.reason || "تم حظرك من التطبيق"
-        });
+      if (activeBan) {
+        socket.data.userName = userName;
+        socket.data.userId = userName;
+        socket.data.displayName = displayName;
+        socket.data.clientId = cleanClientId;
+        socket.data.deviceId = cleanClientId;
+        await emitBanAndDisconnect(socket, activeBan);
         return;
       }
 
@@ -1918,12 +2153,7 @@ io.on("connection", (socket) => {
           { userName },
           { userId: userName }
         ]
-      }).select("socketId isBanned deviceId").lean();
-
-      if (existingUser?.isBanned === true) {
-        socket.emit("error_msg", { message: "This account is banned" });
-        return;
-      }
+      }).select("socketId deviceId").lean();
 
       if (existingUser?.socketId && existingUser.socketId !== socket.id) {
         const oldSocket = io.sockets.sockets.get(existingUser.socketId);
@@ -1969,7 +2199,11 @@ io.on("connection", (socket) => {
             country: "",
             age: null,
             bio: "",
-            gender: "unspecified"
+            gender: "unspecified",
+            reports: 0,
+            isBanned: false,
+            banReason: "",
+            banLevel: 0
           }
         },
         { upsert: true, returnDocument: "after" }
@@ -1992,6 +2226,14 @@ io.on("connection", (socket) => {
         timestamp: new Date()
       });
 
+      socket.emit("ban_status", {
+        isBanned: false,
+        reason: "",
+        level: 0,
+        expiresAt: null,
+        remainingMs: 0
+      });
+
       socket.emit("user_ready_for_matchmaking", {
         success: true,
         userName: displayName,
@@ -2003,6 +2245,43 @@ io.on("connection", (socket) => {
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
       socket.emit("error_msg", { message: "Registration process failed" });
+    }
+  });
+
+  socket.on("check_ban_status", async (data) => {
+    try {
+      const userName = normalizeName(
+        data?.userId ||
+        data?.userName ||
+        socket.data.userName
+      );
+      const deviceId = normalizeClientId(
+        data?.deviceId ||
+        socket.data.deviceId
+      );
+
+      const activeBan = await getActiveBanState({ userName, deviceId });
+
+      if (activeBan) {
+        socket.emit("ban_status", activeBan);
+      } else {
+        socket.emit("ban_status", {
+          isBanned: false,
+          reason: "",
+          level: 0,
+          expiresAt: null,
+          remainingMs: 0
+        });
+      }
+    } catch (err) {
+      logInfo("BAN", "check_ban_status failed", err);
+      socket.emit("ban_status", {
+        isBanned: false,
+        reason: "",
+        level: 0,
+        expiresAt: null,
+        remainingMs: 0
+      });
     }
   });
 
@@ -2032,13 +2311,15 @@ io.on("connection", (socket) => {
         success: true,
         message: "Report submitted successfully",
         reports: result.reports,
-        reportedUserId: result.reportedUserId
+        reportedUserId: result.reportedUserId,
+        ban: result.ban || null
       });
 
       logInfo("REPORT", "User reported via socket", {
         reporterId,
         reportedUserId,
-        reports: result.reports
+        reports: result.reports,
+        ban: result.ban || null
       });
     } catch (err) {
       logInfo("ERROR", "Socket report_user failed", err);
@@ -2148,6 +2429,16 @@ io.on("connection", (socket) => {
         socketId: socket.id
       });
 
+      const activeBan = await getActiveBanState({
+        userName: cleanMe,
+        deviceId: socket.data.deviceId
+      });
+
+      if (activeBan) {
+        await emitBanAndDisconnect(socket, activeBan);
+        return;
+      }
+
       const activeSocketId = userToSocket.get(cleanMe);
       if (activeSocketId && activeSocketId !== socket.id) {
         return;
@@ -2163,10 +2454,12 @@ io.on("connection", (socket) => {
 
       const readiness = await validateUserReadyForMatchmaking(me, socket);
       if (!readiness.ok) {
-        const msg =
-          readiness.reason === "banned"
-            ? "This account is banned"
-            : "User is not ready for matchmaking yet";
+        if (readiness.reason === "banned" && readiness.ban) {
+          await emitBanAndDisconnect(socket, readiness.ban);
+          return;
+        }
+
+        const msg = "User is not ready for matchmaking yet";
         socket.emit("error_msg", { message: msg });
         return;
       }
@@ -3586,6 +3879,36 @@ app.get("/health", async (req, res) => {
       platform: process.platform
     }
   });
+});
+
+app.get("/ban-status", async (req, res) => {
+  try {
+    const userId = normalizeName(req.query.userId || req.query.userName || "");
+    const deviceId = normalizeClientId(req.query.deviceId || "");
+
+    const activeBan = await getActiveBanState({ userName: userId, deviceId });
+
+    if (!activeBan) {
+      return res.json({
+        isBanned: false,
+        reason: "",
+        level: 0,
+        expiresAt: null,
+        remainingMs: 0
+      });
+    }
+
+    return res.json(activeBan);
+  } catch (err) {
+    logInfo("BAN", "GET /ban-status failed", err);
+    return res.status(500).json({
+      isBanned: false,
+      reason: "",
+      level: 0,
+      expiresAt: null,
+      remainingMs: 0
+    });
+  }
 });
 
 app.post("/report-user", async (req, res) => {
