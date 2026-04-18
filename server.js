@@ -90,7 +90,15 @@ mongoose.set("bufferCommands", false);
 // 2. تعريف مخططات قاعدة البيانات
 // ==========================================
 
-const userSchema = new mongoose.Schema(
+
+ const banSchema = new mongoose.Schema({
+  userId: { type: String, index: true },
+  deviceId: { type: String, index: true },
+  reason: { type: String, default: "" },
+  bannedAt: { type: Date, default: Date.now }
+});
+
+const Ban = mongoose.model("Ban", banSchema); 
   {
     userId: {
       type: String,
