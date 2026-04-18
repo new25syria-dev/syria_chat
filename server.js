@@ -10,7 +10,9 @@ const http = require("http");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
+
 const MAX_REPORTS = 3;
+
 const envCandidates = [
   ".env",
   ".nenv",
@@ -205,7 +207,6 @@ const randomChatMessageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ جدول الحظر
 const banSchema = new mongoose.Schema(
   {
     userId: { type: String, default: "", trim: true, index: true },
@@ -216,16 +217,10 @@ const banSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const User = mongoose.model("User", userSchema);
-const Friendship = mongoose.model("Friendship", friendshipSchema);
-const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
-const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
-const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
-const Ban = mongoose.model("Ban", banSchema);
 const reportSchema = new mongoose.Schema(
   {
-    reporter: { type: String, required: true },
-    reported: { type: String, required: true },
+    reporter: { type: String, required: true, trim: true, index: true },
+    reported: { type: String, required: true, trim: true, index: true },
     createdAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
@@ -233,7 +228,14 @@ const reportSchema = new mongoose.Schema(
 
 reportSchema.index({ reporter: 1, reported: 1 }, { unique: true });
 
+const User = mongoose.model("User", userSchema);
+const Friendship = mongoose.model("Friendship", friendshipSchema);
+const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
+const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
+const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
+const Ban = mongoose.model("Ban", banSchema);
 const Report = mongoose.model("Report", reportSchema);
+
 // ==========================================
 // 3. إدارة الحالة في الذاكرة
 // ==========================================
@@ -1562,59 +1564,7 @@ function requestTwilioToken() {
         "Content-Length": Buffer.byteLength(postData),
       },
     };
-app.post("/report-user", async (req, res) => {
-  try {
-    const { reporterId, reportedUserId } = req.body;
 
-    const reporter = normalizeName(reporterId);
-    const reported = normalizeName(reportedUserId);
-
-    if (!reporter || !reported || reporter === reported) {
-      return res.status(400).json({ error: "Invalid data" });
-    }
-
-    const exists = await Report.findOne({
-      reporter,
-      reported
-    });
-
-    if (exists) {
-      return res.json({ success: false, message: "Already reported" });
-    }
-
-    await Report.create({ reporter, reported });
-
-    const user = await User.findOneAndUpdate(
-      {
-        $or: [
-          { userName: reported },
-          { userId: reported }
-        ]
-      },
-      {
-        $inc: { reports: 1 }
-      },
-      { new: true }
-    );
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    if (user.reports >= MAX_REPORTS) {
-      await banUserNow(reported, "Too many reports");
-    }
-
-    return res.json({
-      success: true,
-      reports: user.reports
-    });
-
-  } catch (err) {
-    logInfo("ERROR", "Report system failed", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
     const req = https.request(options, (res) => {
       let body = "";
 
@@ -1683,11 +1633,12 @@ app.post("/report-user", async (req, res) => {
     req.end();
   });
 }
+
 async function banUserNow(userName, reason = "Too many reports") {
   const cleanName = normalizeName(userName);
   if (!cleanName) return;
 
-  await User.findOneAndUpdate(
+  const user = await User.findOneAndUpdate(
     {
       $or: [
         { userName: cleanName },
@@ -1696,8 +1647,27 @@ async function banUserNow(userName, reason = "Too many reports") {
     },
     {
       $set: { isBanned: true }
+    },
+    { new: true }
+  ).lean();
+
+  if (user) {
+    const existingBan = await Ban.findOne({
+      $or: [
+        { userId: cleanName },
+        ...(user.deviceId ? [{ deviceId: user.deviceId }] : [])
+      ]
+    }).lean();
+
+    if (!existingBan) {
+      await Ban.create({
+        userId: cleanName,
+        deviceId: user.deviceId || "",
+        reason,
+        bannedAt: new Date()
+      });
     }
-  );
+  }
 
   const socket = await getUserSocket(cleanName);
 
@@ -1708,6 +1678,54 @@ async function banUserNow(userName, reason = "Too many reports") {
 
   logInfo("BAN", `User banned: ${cleanName}`, { reason });
 }
+
+async function processUserReport(reporterId, reportedUserId) {
+  const reporter = normalizeName(reporterId);
+  const reported = normalizeName(reportedUserId);
+
+  if (!reporter || !reported || reporter === reported) {
+    return { success: false, message: "Invalid data" };
+  }
+
+  const exists = await Report.findOne({
+    reporter,
+    reported
+  }).lean();
+
+  if (exists) {
+    return { success: false, message: "Already reported" };
+  }
+
+  await Report.create({ reporter, reported });
+
+  const user = await User.findOneAndUpdate(
+    {
+      $or: [
+        { userName: reported },
+        { userId: reported }
+      ]
+    },
+    {
+      $inc: { reports: 1 }
+    },
+    { new: true }
+  ).lean();
+
+  if (!user) {
+    return { success: false, message: "User not found" };
+  }
+
+  if (user.reports >= MAX_REPORTS) {
+    await banUserNow(reported, "Too many reports");
+  }
+
+  return {
+    success: true,
+    reports: user.reports,
+    reportedUserId: reported
+  };
+}
+
 // ==========================================
 // 5. منطق المطابقة
 // ==========================================
@@ -1881,7 +1899,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // ✅ فحص الحظر قبل التسجيل
       const bannedRecord = await Ban.findOne({
         $or: [
           { userId: userName },
@@ -1986,6 +2003,49 @@ io.on("connection", (socket) => {
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
       socket.emit("error_msg", { message: "Registration process failed" });
+    }
+  });
+
+  socket.on("report_user", async (data) => {
+    try {
+      const reporterId = socket.data.userName;
+      const reportedUserId = normalizeName(
+        data?.reportedUserId ||
+        data?.partnerId ||
+        data?.toId
+      );
+
+      if (!reporterId || !reportedUserId) {
+        return socket.emit("report_result", {
+          success: false,
+          message: "Invalid report data"
+        });
+      }
+
+      const result = await processUserReport(reporterId, reportedUserId);
+
+      if (!result.success) {
+        return socket.emit("report_result", result);
+      }
+
+      socket.emit("report_result", {
+        success: true,
+        message: "Report submitted successfully",
+        reports: result.reports,
+        reportedUserId: result.reportedUserId
+      });
+
+      logInfo("REPORT", "User reported via socket", {
+        reporterId,
+        reportedUserId,
+        reports: result.reports
+      });
+    } catch (err) {
+      logInfo("ERROR", "Socket report_user failed", err);
+      socket.emit("report_result", {
+        success: false,
+        message: "Failed to submit report"
+      });
     }
   });
 
@@ -3526,6 +3586,23 @@ app.get("/health", async (req, res) => {
       platform: process.platform
     }
   });
+});
+
+app.post("/report-user", async (req, res) => {
+  try {
+    const { reporterId, reportedUserId } = req.body;
+
+    const result = await processUserReport(reporterId, reportedUserId);
+
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    return res.json(result);
+  } catch (err) {
+    logInfo("ERROR", "Report system failed", err);
+    res.status(500).json({ success: false, error: "Server error" });
+  }
 });
 
 // ==========================================
