@@ -1648,7 +1648,7 @@ async function banUserNow(userName, reason = "Too many reports") {
     {
       $set: { isBanned: true }
     },
-    { new: true }
+    { returnDocument: "after" }
   ).lean();
 
   if (user) {
@@ -1708,7 +1708,7 @@ async function processUserReport(reporterId, reportedUserId) {
     {
       $inc: { reports: 1 }
     },
-    { new: true }
+    { returnDocument: "after" }
   ).lean();
 
   if (!user) {
