@@ -2165,14 +2165,15 @@ io.on("connection", (socket) => {
         chatType: requestedChatType,
       });
 
-      if (requestedChatType === "voice" && isUserInVoiceTransition(me)) {
-        logInfo("DEBUG", "leave_chat ignored during voice transition", {
-          user: me,
-          socketId: socket.id,
-          chatType: requestedChatType,
-        });
-        return;
-      }
+     // ALWAYS allow leave_chat (حتى في voice)
+logInfo("DEBUG", "leave_chat FORCE executed", {
+  user: me,
+  socketId: socket.id,
+  chatType: requestedChatType,
+});
+
+await clearUserBusyState(me, "left_chat", requestedChatType);
+await clearRandomCallStateForUser(me, "left_chat");
 
       await clearUserBusyState(me, "left_chat", requestedChatType);
       await clearRandomCallStateForUser(me, "left_chat");
