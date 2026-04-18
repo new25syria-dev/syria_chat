@@ -109,8 +109,6 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
     },
     displayName: { type: String, default: "", trim: true, index: true },
-
-    // ✅ تمت الإضافة هنا
     deviceId: {
       type: String,
       default: "",
@@ -118,7 +116,6 @@ const userSchema = new mongoose.Schema(
       index: true,
       lowercase: true,
     },
-
     socketId: { type: String, default: null },
     online: { type: Boolean, default: false },
     lastSeen: { type: Date, default: Date.now },
@@ -939,8 +936,7 @@ async function ensureUserRegistrationState(userName, socketId = null) {
         $setOnInsert: {
           userName: cleanName,
           userId: cleanName,
-          displayName: cleanName,
-          deviceId: ""
+          displayName: cleanName
         }
       },
       { upsert: true, returnDocument: "after" }
@@ -1818,7 +1814,7 @@ io.on("connection", (socket) => {
       socket.data.userId = userName;
       socket.data.displayName = displayName;
       socket.data.clientId = cleanClientId;
-      socket.data.deviceId = cleanClientId; // ✅ تمت الإضافة
+      socket.data.deviceId = cleanClientId;
       socket.data.chatType = preservedChatType;
 
       socketToUser.set(socket.id, userName);
@@ -1837,7 +1833,7 @@ io.on("connection", (socket) => {
             userName,
             userId: userName,
             displayName,
-            deviceId: cleanClientId, // ✅ تمت الإضافة
+            deviceId: cleanClientId,
             socketId: socket.id,
             online: true,
             lastSeen: new Date()
@@ -1847,8 +1843,7 @@ io.on("connection", (socket) => {
             country: "",
             age: null,
             bio: "",
-            gender: "unspecified",
-            deviceId: cleanClientId // ✅ تمت الإضافة
+            gender: "unspecified"
           }
         },
         { upsert: true, returnDocument: "after" }
@@ -1866,7 +1861,7 @@ io.on("connection", (socket) => {
         userName: displayName,
         displayName,
         userId: userName,
-        deviceId: cleanClientId, // ✅ تمت الإضافة
+        deviceId: cleanClientId,
         canonicalUserName: userName,
         timestamp: new Date()
       });
