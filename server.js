@@ -447,8 +447,7 @@ function parseRegistrationPayload(rawPayload) {
     const clientId = normalizeClientId(
       rawPayload.clientId ||
         rawPayload.deviceId ||
-        rawPayload.accountId ||
-        rawPayload.userId
+        rawPayload.accountId
     );
 
     return {
@@ -1257,7 +1256,17 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
     locked: isUserLocked(me),
   });
 
-  // ❌ تم حذف منطق voice transition بالكامل (كان يمنع الخروج)
+  if (
+    (reason === "left_chat" || reason === "partner_stopped_search") &&
+    isUserInVoiceTransition(me)
+  ) {
+    logInfo("DEBUG", "clearUserBusyState ignored during voice transition", {
+      user: me,
+      reason,
+      chatType: safeChatType,
+    });
+    return;
+  }
 
   const wasInQueueOnly =
     isUserInQueue(me, safeChatType) &&
@@ -1280,68 +1289,6 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       reason,
     });
 
-    activeMatches.delete(me);
-    activeMatches.delete(activePartner);
-    unlockUserSearch(me);
-    unlockUserSearch(activePartner);
-    clearVoiceMatchGrace(me);
-    clearVoiceMatchGrace(activePartner);
-
-    await deletePendingFriendRequestsBetween(me, activePartner);
-
-    await emitToUser(activePartner, "match_closed", { reason });
-
-    // ✅ تم حذف left_chat من إعادة البحث
-    if (
-      reason === "partner_stopped_search" ||
-      reason === "partner_left" ||
-      reason === "partner_disconnected"
-    ) {
-      await restartSearchForUser(activePartner);
-    }
-
-    return;
-  }
-
-  const pendingKey = pendingMatchByUser.get(me);
-  if (pendingKey) {
-    const proposal = pendingMatches.get(pendingKey);
-    if (proposal) {
-      if (proposal.timeoutId) {
-        clearTimeout(proposal.timeoutId);
-      }
-
-      const other = proposal.userA === me ? proposal.userB : proposal.userA;
-
-      pendingMatches.delete(pendingKey);
-      pendingMatchByUser.delete(proposal.userA);
-      pendingMatchByUser.delete(proposal.userB);
-      unlockUserSearch(proposal.userA);
-      unlockUserSearch(proposal.userB);
-      clearVoiceMatchGrace(proposal.userA);
-      clearVoiceMatchGrace(proposal.userB);
-
-      await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
-
-      await emitToUser(other, "match_cancelled", { reason });
-
-      if (
-        reason === "partner_stopped_search" ||
-        reason === "partner_left" ||
-        reason === "partner_disconnected"
-      ) {
-        await restartSearchForUser(other);
-      }
-    } else {
-      pendingMatchByUser.delete(me);
-      unlockUserSearch(me);
-      clearVoiceMatchGrace(me);
-    }
-    return;
-  }
-
-  unlockUserSearch(me);
-}
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
     unlockUserSearch(me);
@@ -1698,7 +1645,7 @@ async function tryMatch(userName, requestedChatType = null) {
     });
 
     if (isUserInQueue(me)) {
-      removeFromQueue(me);
+      removeFromQueue(me, chatType);
     }
 
     let partner = null;
@@ -1804,132 +1751,6 @@ function socketChatTypeFromUser(socket, userName) {
   return getUserPreferredChatType(userName);
 }
 
-async function handleSocketRegistration(socket, rawPayload) {
-  const registration = parseRegistrationPayload(rawPayload);
-  const displayName = sanitizeOptionalString(
-    normalizeDisplayName(
-      registration.displayName ||
-        rawPayload?.displayName ||
-        rawPayload?.name ||
-        rawPayload?.userName
-    ),
-    60
-  );
-
-  if (!displayName) {
-    socket.emit("error_msg", { message: "Display name is required" });
-    return null;
-  }
-
-  const cleanClientId = normalizeClientId(
-    registration.clientId ||
-      rawPayload?.clientId ||
-      rawPayload?.deviceId ||
-      rawPayload?.accountId ||
-      rawPayload?.userId
-  );
-
-  if (!cleanClientId) {
-    socket.emit("error_msg", { message: "Invalid client identity" });
-    return null;
-  }
-
-  const userName = buildStableUserId(cleanClientId);
-  if (!userName) {
-    socket.emit("error_msg", { message: "Invalid user identity" });
-    return null;
-  }
-
-  const requestedChatType = normalizeChatType(
-    rawPayload?.chatType || socket.data.chatType || getUserPreferredChatType(userName)
-  );
-
-  const existingUser = await User.findOne({
-    $or: [{ userName }, { userId: userName }]
-  }).select("socketId isBanned").lean();
-
-  if (existingUser?.isBanned === true) {
-    socket.emit("error_msg", { message: "This account is banned" });
-    return null;
-  }
-
-  if (existingUser?.socketId && existingUser.socketId !== socket.id) {
-    const oldSocket = io.sockets.sockets.get(existingUser.socketId);
-    if (oldSocket) {
-      oldSocket.emit("session_replaced", {
-        message: "Logged in from another device"
-      });
-      oldSocket.disconnect(true);
-    }
-    socketToUser.delete(existingUser.socketId);
-  }
-
-  socket.data.userName = userName;
-  socket.data.userId = userName;
-  socket.data.displayName = displayName;
-  socket.data.clientId = cleanClientId;
-  socket.data.chatType = requestedChatType;
-
-  socketToUser.set(socket.id, userName);
-  userToSocket.set(userName, socket.id);
-  userSearchPreferences.set(userName, requestedChatType);
-
-  await User.findOneAndUpdate(
-    {
-      $or: [{ userName }, { userId: userName }]
-    },
-    {
-      $set: {
-        userName,
-        userId: userName,
-        displayName,
-        socketId: socket.id,
-        online: true,
-        lastSeen: new Date()
-      },
-      $setOnInsert: {
-        profileImage: "",
-        country: "",
-        age: null,
-        bio: "",
-        gender: "unspecified"
-      }
-    },
-    { upsert: true, returnDocument: "after" }
-  );
-
-  logInfo("Auth", `User registered`, {
-    userName,
-    displayName,
-    chatType: requestedChatType,
-    socketId: socket.id
-  });
-
-  socket.emit("registration_success", {
-    userName: displayName,
-    displayName,
-    userId: userName,
-    canonicalUserName: userName,
-    timestamp: new Date()
-  });
-
-  socket.emit("user_ready_for_matchmaking", {
-    success: true,
-    userName: displayName,
-    userId: userName,
-    socketId: socket.id,
-    chatType: requestedChatType
-  });
-
-  await notifyFriendsStatusChanged(userName);
-
-  return {
-    userName,
-    displayName,
-    chatType: requestedChatType
-  };
-}
-
 // ==========================================
 // 6. أحداث السوكيت
 // ==========================================
@@ -1937,78 +1758,114 @@ async function handleSocketRegistration(socket, rawPayload) {
 io.on("connection", (socket) => {
   logInfo("Network", `Socket connected: ${socket.id}`);
 
-  socket.on("register_user", async (rawPayload) => {
+  socket.on("register_user", async (rawName) => {
     try {
-      await handleSocketRegistration(socket, rawPayload);
-    } catch (err) {
-      logInfo("Error", "Registration process failed", err);
-      socket.emit("error_msg", { message: "Registration process failed" });
-    }
-  });
+      const registration = parseRegistrationPayload(rawName);
+      const displayName = sanitizeOptionalString(registration.displayName, 60);
 
-  socket.on("register", async (rawPayload) => {
-    try {
-      await handleSocketRegistration(socket, rawPayload);
-    } catch (err) {
-      logInfo("Error", "Registration(alias) process failed", err);
-      socket.emit("error_msg", { message: "Registration process failed" });
-    }
-  });
-
-  socket.on("update_chat_type", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) {
-        socket.emit("error_msg", {
-          message: "Please register user before updating chat type"
-        });
+      if (!displayName) {
+        socket.emit("error_msg", { message: "Display name is required" });
         return;
       }
 
-      const cleanMe = normalizeName(me);
-      const requestedChatType = normalizeChatType(
-        payload?.chatType || socket.data.chatType || getUserPreferredChatType(cleanMe)
-      );
+      const cleanClientId = normalizeClientId(registration.clientId);
+      if (!cleanClientId) {
+        socket.emit("error_msg", { message: "Invalid client identity" });
+        return;
+      }
 
-      const oldChatType = socketChatTypeFromUser(socket, cleanMe);
+      const userName = buildStableUserId(cleanClientId);
+      if (!userName) {
+        socket.emit("error_msg", { message: "Invalid user identity" });
+        return;
+      }
 
-      removeFromQueue(cleanMe);
-      clearVoiceMatchGrace(cleanMe);
+      const existingUser = await User.findOne({
+        $or: [
+          { userName },
+          { userId: userName }
+        ]
+      }).select("socketId isBanned").lean();
 
-      setUserPreferredChatType(cleanMe, requestedChatType, socket);
-      socket.data.chatType = requestedChatType;
+      if (existingUser?.isBanned === true) {
+        socket.emit("error_msg", { message: "This account is banned" });
+        return;
+      }
+
+      if (existingUser?.socketId && existingUser.socketId !== socket.id) {
+        const oldSocket = io.sockets.sockets.get(existingUser.socketId);
+        if (oldSocket) {
+          oldSocket.emit("session_replaced", { message: "Logged in from another device" });
+          oldSocket.disconnect(true);
+        }
+        socketToUser.delete(existingUser.socketId);
+      }
+
+      const preservedChatType = getUserPreferredChatType(userName);
+
+      socket.data.userName = userName;
+      socket.data.userId = userName;
+      socket.data.displayName = displayName;
+      socket.data.clientId = cleanClientId;
+      socket.data.chatType = preservedChatType;
+
+      socketToUser.set(socket.id, userName);
+      userToSocket.set(userName, socket.id);
+      userSearchPreferences.set(userName, preservedChatType);
 
       await User.findOneAndUpdate(
         {
-          $or: [{ userName: cleanMe }, { userId: cleanMe }]
+          $or: [
+            { userName },
+            { userId: userName }
+          ]
         },
         {
           $set: {
+            userName,
+            userId: userName,
+            displayName,
             socketId: socket.id,
             online: true,
             lastSeen: new Date()
+          },
+          $setOnInsert: {
+            profileImage: "",
+            country: "",
+            age: null,
+            bio: "",
+            gender: "unspecified"
           }
         },
-        { returnDocument: "after" }
+        { upsert: true, returnDocument: "after" }
       );
 
-      logInfo("CHAT_TYPE", `User chat type updated`, {
-        user: cleanMe,
-        oldChatType,
-        newChatType: requestedChatType,
-        socketId: socket.id,
-        textQueueSize: waitingQueues.text.length,
-        voiceQueueSize: waitingQueues.voice.length
+      logInfo("Auth", `User registered`, {
+        userName,
+        displayName,
+        chatType: preservedChatType,
+        socketId: socket.id
       });
 
-      socket.emit("chat_type_updated", {
-        success: true,
-        oldChatType,
-        chatType: requestedChatType
+      socket.emit("registration_success", {
+        userName: displayName,
+        displayName,
+        userId: userName,
+        canonicalUserName: userName,
+        timestamp: new Date()
       });
+
+      socket.emit("user_ready_for_matchmaking", {
+        success: true,
+        userName: displayName,
+        userId: userName,
+        socketId: socket.id
+      });
+
+      await notifyFriendsStatusChanged(userName);
     } catch (err) {
-      logInfo("Error", "update_chat_type failed", err);
-      socket.emit("error_msg", { message: "Failed to update chat type" });
+      logInfo("Error", "Registration process failed", err);
+      socket.emit("error_msg", { message: "Registration process failed" });
     }
   });
 
@@ -2103,7 +1960,6 @@ io.on("connection", (socket) => {
       const chatType = normalizeChatType(payload?.chatType);
 
       setUserPreferredChatType(cleanMe, chatType, socket);
-      socket.data.chatType = chatType;
 
       logInfo("Matchmaking", `find_partner received`, {
         user: cleanMe,
@@ -2117,20 +1973,13 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (isUserUnavailableForMatch(cleanMe) || isUserInVoiceTransition(cleanMe)) {
+      if (
+        isUserInQueue(cleanMe) ||
+        isUserUnavailableForMatch(cleanMe) ||
+        isUserInVoiceTransition(cleanMe)
+      ) {
         return;
       }
-
-      if (isUserInQueue(cleanMe)) {
-        removeFromQueue(cleanMe);
-      }
-
-      logInfo("CHAT_TYPE", "find_partner applied chat type", {
-        user: cleanMe,
-        chatType,
-        textQueueSize: waitingQueues.text.length,
-        voiceQueueSize: waitingQueues.voice.length
-      });
 
       const readiness = await validateUserReadyForMatchmaking(me, socket);
       if (!readiness.ok) {
@@ -2201,40 +2050,30 @@ io.on("connection", (socket) => {
     }
   });
 
-socket.on("leave_chat", async (payload) => {
-  try {
-    const me = socket.data.userName;
-    if (!me) return;
+  socket.on("leave_chat", async (payload) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
 
-    const requestedChatType = normalizeChatType(
-      payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-    );
-    setUserPreferredChatType(me, requestedChatType, socket);
+      const requestedChatType = normalizeChatType(
+        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
+      );
+      setUserPreferredChatType(me, requestedChatType, socket);
 
-    logInfo("DEBUG", "leave_chat FORCE executed", {
-      user: me,
-      socketId: socket.id,
-      chatType: requestedChatType,
-    });
+      logInfo("DEBUG", "leave_chat received", {
+        user: me,
+        socketId: socket.id,
+        chatType: requestedChatType,
+      });
 
-    // ❌ حذف شرط voice transition بالكامل
-
-    await clearUserBusyState(me, "left_chat", requestedChatType);
-    await clearRandomCallStateForUser(me, "left_chat");
-
-    socket.emit("search_stopped", {
-      success: true,
-      mode: "leave_chat",
-      chatType: requestedChatType
-    });
-  } catch (err) {
-    logInfo("Error", "leave_chat failed", err);
-    socket.emit("error_msg", { message: "Failed to leave chat" });
-  }
-}); 
-
-await clearUserBusyState(me, "left_chat", requestedChatType);
-await clearRandomCallStateForUser(me, "left_chat");
+      if (requestedChatType === "voice" && isUserInVoiceTransition(me)) {
+        logInfo("DEBUG", "leave_chat ignored during voice transition", {
+          user: me,
+          socketId: socket.id,
+          chatType: requestedChatType,
+        });
+        return;
+      }
 
       await clearUserBusyState(me, "left_chat", requestedChatType);
       await clearRandomCallStateForUser(me, "left_chat");
@@ -2296,8 +2135,8 @@ await clearRandomCallStateForUser(me, "left_chat");
           userB: proposal.userB,
           activeA: activeMatches.get(proposal.userA),
           activeB: activeMatches.get(proposal.userB),
-          lockedA: true,
-          lockedB: true,
+          lockedA: isUserLocked(proposal.userA),
+          lockedB: isUserLocked(proposal.userB),
           graceA: hasVoiceMatchGrace(proposal.userA),
           graceB: hasVoiceMatchGrace(proposal.userB),
         });
