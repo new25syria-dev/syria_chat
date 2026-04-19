@@ -3842,16 +3842,52 @@ socket.on("stop_search", async (payload) => {
     }
   });
 
-  socket.on("end_random_call", async () => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+ socket.on("end_random_call", async () => {
+  try {
+    const me = socket.data.userName;
+    if (!me) return;
 
-      await clearRandomCallStateForUser(me, "ended");
-    } catch (err) {
-      logInfo("Error", "end_random_call failed", err);
+    const partner = activeRandomCalls.get(me) || null;
+
+    if (partner) {
+      activeRandomCalls.delete(me);
+      activeRandomCalls.delete(partner);
+
+      unlockUserSearch(me);
+      unlockUserSearch(partner);
+
+      clearVoiceMatchGrace(me);
+      clearVoiceMatchGrace(partner);
+      clearRecentVoicePartnerPair(me, partner);
+
+      await emitToUser(partner, "random_call_ended", {
+        reason: "ended",
+        from: me,
+        partnerId: me,
+        to: partner
+      });
+
+      await emitToUser(me, "random_call_ended", {
+        reason: "ended",
+        from: me,
+        partnerId: partner,
+        to: partner
+      });
+
+      await clearRandomVoiceRelationship(me, partner, {
+        restartUsers: true,
+        notifyClosed: false,
+        reason: "ended"
+      });
+
+      return;
     }
-  });
+
+    await clearRandomCallStateForUser(me, "ended");
+  } catch (err) {
+    logInfo("Error", "end_random_call failed", err);
+  }
+});
 
   socket.on("random_webrtc_offer", async (data) => {
     try {
