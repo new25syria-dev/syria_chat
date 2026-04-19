@@ -2630,19 +2630,30 @@ io.on("connection", (socket) => {
   // ==========================================
   // stop_search الآن محلي فقط ولا يؤثر على الشريك
   // ==========================================
-  socket.on("stop_search", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+socket.on("stop_search", async (payload) => {
+  try {
+    const me = socket.data.userName;
+    if (!me) return;
 
-      const requestedChatType = normalizeChatType(
-        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-      );
-      setUserPreferredChatType(me, requestedChatType, socket);
+    const requestedChatType = normalizeChatType(
+      payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
+    );
 
-      const cleanMe = normalizeName(me);
-      markUserSearchStopped(cleanMe);
+    setUserPreferredChatType(me, requestedChatType, socket);
 
+    const cleanMe = normalizeName(me);
+    markUserSearchStopped(cleanMe);
+
+    const isInQueueOnly =
+      isUserInQueue(cleanMe, requestedChatType) &&
+      !pendingMatchByUser.has(cleanMe) &&
+      !activeMatches.has(cleanMe) &&
+      !activeCalls.has(cleanMe) &&
+      !activeRandomCalls.has(cleanMe) &&
+      !pendingCallByUser.has(cleanMe) &&
+      !pendingRandomCallByUser.has(cleanMe);
+
+    if (isInQueueOnly) {
       removeFromQueue(cleanMe, requestedChatType);
       unlockUserSearch(cleanMe);
 
@@ -2651,50 +2662,45 @@ io.on("connection", (socket) => {
         mode: "self_only",
         chatType: requestedChatType
       });
-    } catch (err) {
-      logInfo("Error", "stop_search failed", err);
-      socket.emit("error_msg", { message: "Failed to stop search" });
+      return;
     }
-  });
 
-  socket.on("leave_chat", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+    const hasPendingOrActiveMatch =
+      pendingMatchByUser.has(cleanMe) || activeMatches.has(cleanMe);
 
-      const requestedChatType = normalizeChatType(
-        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-      );
-      setUserPreferredChatType(me, requestedChatType, socket);
+    const isInsideCall =
+      activeCalls.has(cleanMe) ||
+      activeRandomCalls.has(cleanMe) ||
+      pendingCallByUser.has(cleanMe) ||
+      pendingRandomCallByUser.has(cleanMe);
 
-      logInfo("DEBUG", "leave_chat received", {
-        user: me,
-        socketId: socket.id,
-        chatType: requestedChatType,
-      });
-
-      if (isUserInVoiceTransition(me)) {
-        logInfo("DEBUG", "leave_chat ignored during voice transition", {
-          user: me,
-          socketId: socket.id,
-          chatType: requestedChatType,
-        });
-        return;
-      }
-
-      await clearUserBusyState(me, "left_chat", requestedChatType);
-      await clearRandomCallStateForUser(me, "left_chat");
+    // إذا كان في صفحة التطابق فقط، ألغِ التطابق للطرفين
+    // وأعد الطرف الآخر للبحث مباشرة
+    if (hasPendingOrActiveMatch && !isInsideCall) {
+      await clearUserBusyState(cleanMe, "partner_stopped_search", requestedChatType);
 
       socket.emit("search_stopped", {
         success: true,
-        mode: "leave_chat",
+        mode: "relationship_state",
         chatType: requestedChatType
       });
-    } catch (err) {
-      logInfo("Error", "leave_chat failed", err);
-      socket.emit("error_msg", { message: "Failed to leave chat" });
+      return;
     }
-  });
+
+    // إذا كان داخل مكالمة أو خارج أي علاقة، أوقف البحث لهذا المستخدم فقط
+    removeFromQueue(cleanMe, requestedChatType);
+    unlockUserSearch(cleanMe);
+
+    socket.emit("search_stopped", {
+      success: true,
+      mode: "self_only",
+      chatType: requestedChatType
+    });
+  } catch (err) {
+    logInfo("Error", "stop_search failed", err);
+    socket.emit("error_msg", { message: "Failed to stop search" });
+  }
+});
 
   socket.on("accept_match", async (payload) => {
     try {
