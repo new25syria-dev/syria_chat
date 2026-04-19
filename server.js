@@ -251,16 +251,19 @@ const Report = mongoose.model("Report", reportSchema);
 // 3. إدارة الحالة في الذاكرة
 // ==========================================
 const socketToUser = new Map();
+
 const waitingQueues = {
   text: [],
   voice: []
 };
+
 const activeMatches = new Map();
 const pendingMatches = new Map();
 const pendingMatchByUser = new Map();
 const userTypingTimeout = new Map();
 const userSearchPreferences = new Map();
 const userSearchLocks = new Set();
+const userSearchStopped = new Set();
 
 const userToSocket = new Map();
 const matchmakingLocks = new Set();
@@ -278,7 +281,6 @@ const pendingRandomCallByUser = new Map();
 const voiceMatchGrace = new Map();
 const VOICE_MATCH_GRACE_MS = 20000;
 
-// جديد: يحتفظ بآخر شريك صوتي خلال نافذة الانتقال
 const recentVoicePartners = new Map();
 
 // ==========================================
@@ -297,12 +299,14 @@ function logInfo(scope, message, extra = undefined) {
     }
   }
 }
+
 function shouldInitiateRandomCall(userA, userB) {
   const a = normalizeName(userA);
   const b = normalizeName(userB);
   if (!a || !b) return true;
   return a <= b;
 }
+
 function normalizeName(value) {
   if (!value) return "";
   return String(value).trim().toLowerCase();
@@ -360,6 +364,24 @@ function setUserPreferredChatType(userName, chatType, socket = null) {
   }
 
   return safeChatType;
+}
+
+function markUserSearchStopped(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  userSearchStopped.add(cleanName);
+}
+
+function clearUserSearchStopped(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  userSearchStopped.delete(cleanName);
+}
+
+function hasUserSearchStopped(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return false;
+  return userSearchStopped.has(cleanName);
 }
 
 function lockUserSearch(userName) {
@@ -522,14 +544,14 @@ function parseRegistrationPayload(rawPayload) {
   if (rawPayload && typeof rawPayload === "object") {
     const displayName = normalizeDisplayName(
       rawPayload.userName ||
-        rawPayload.displayName ||
-        rawPayload.name
+      rawPayload.displayName ||
+      rawPayload.name
     );
 
     const clientId = normalizeClientId(
       rawPayload.clientId ||
-        rawPayload.deviceId ||
-        rawPayload.accountId
+      rawPayload.deviceId ||
+      rawPayload.accountId
     );
 
     return {
@@ -648,6 +670,7 @@ function addToQueue(userName, chatType = "text") {
   const safeChatType = normalizeChatType(chatType);
 
   if (!cleanName) return false;
+  if (hasUserSearchStopped(cleanName)) return false;
   if (isUserUnavailableForMatch(cleanName)) return false;
   if (isUserInVoiceTransition(cleanName)) return false;
   if (isUserInQueue(cleanName)) return false;
@@ -755,10 +778,7 @@ async function getActiveBanState({ userName = "", deviceId = "" } = {}) {
 
     if (cleanUserName) {
       userDoc = await User.findOne({
-        $or: [
-          { userName: cleanUserName },
-          { userId: cleanUserName }
-        ]
+        $or: [{ userName: cleanUserName }, { userId: cleanUserName }]
       })
         .select("_id userId userName deviceId isBanned banExpiresAt banReason banLevel")
         .lean();
@@ -773,7 +793,6 @@ async function getActiveBanState({ userName = "", deviceId = "" } = {}) {
           expiresAt: userBanExpires
         });
       }
-
       await clearExpiredBanState(userDoc);
     }
 
@@ -803,9 +822,7 @@ async function getActiveBanState({ userName = "", deviceId = "" } = {}) {
         expiresAt: { $lte: now },
         $or: orConditions
       },
-      {
-        $set: { active: false }
-      }
+      { $set: { active: false } }
     );
 
     return null;
@@ -843,10 +860,7 @@ async function getUserSocket(userName) {
     }
 
     const user = await User.findOne({
-      $or: [
-        { userName: cleanName },
-        { userId: cleanName }
-      ]
+      $or: [{ userName: cleanName }, { userId: cleanName }]
     }).select("socketId userName userId").lean();
 
     if (!user || !user.socketId) return null;
@@ -886,10 +900,7 @@ async function getFullUserProfile(userName) {
     if (!cleanName) return null;
 
     const user = await User.findOne({
-      $or: [
-        { userName: cleanName },
-        { userId: cleanName }
-      ]
+      $or: [{ userName: cleanName }, { userId: cleanName }]
     }).lean();
 
     if (!user) return null;
@@ -922,10 +933,7 @@ async function resolveUserByAnyIdentifier(userName) {
     if (!cleanName && !cleanDisplayName) return null;
 
     let user = await User.findOne({
-      $or: [
-        { userName: cleanName },
-        { userId: cleanName }
-      ]
+      $or: [{ userName: cleanName }, { userId: cleanName }]
     })
       .select("userName userId displayName online lastSeen socketId profileImage")
       .lean();
@@ -933,9 +941,7 @@ async function resolveUserByAnyIdentifier(userName) {
     if (user) return user;
 
     if (cleanDisplayName) {
-      user = await User.findOne({
-        displayName: cleanDisplayName
-      })
+      user = await User.findOne({ displayName: cleanDisplayName })
         .select("userName userId displayName online lastSeen socketId profileImage")
         .lean();
     }
@@ -986,12 +992,7 @@ async function getUserStatusSummary(userName) {
 
     if (isOnlineNow && (user.online !== true || user.socketId !== liveSocket.id)) {
       User.updateOne(
-        {
-          $or: [
-            { userName: canonicalId },
-            { userId: canonicalId }
-          ]
-        },
+        { $or: [{ userName: canonicalId }, { userId: canonicalId }] },
         {
           $set: {
             online: true,
@@ -1006,12 +1007,7 @@ async function getUserStatusSummary(userName) {
 
     if (!isOnlineNow && user.online === true) {
       User.updateOne(
-        {
-          $or: [
-            { userName: canonicalId },
-            { userId: canonicalId }
-          ]
-        },
+        { $or: [{ userName: canonicalId }, { userId: canonicalId }] },
         {
           $set: {
             online: false,
@@ -1058,10 +1054,7 @@ async function notifyFriendsStatusChanged(userName) {
     if (!me) return;
 
     const friendships = await Friendship.find({
-      $or: [
-        { userA: me },
-        { userB: me }
-      ]
+      $or: [{ userA: me }, { userB: me }]
     })
       .select("userA userB")
       .lean();
@@ -1094,16 +1087,12 @@ async function getFriendIdsForUser(userName) {
     if (!me) return [];
 
     const friendships = await Friendship.find({
-      $or: [
-        { userA: me },
-        { userB: me }
-      ]
+      $or: [{ userA: me }, { userB: me }]
     })
       .select("userA userB")
       .lean();
 
     const ids = [];
-
     for (const item of friendships) {
       const friend = item.userA === me ? item.userB : item.userA;
       if (friend) ids.push(friend);
@@ -1124,14 +1113,14 @@ function extractTargetName(rawValue) {
   if (typeof rawValue === "object") {
     return normalizeName(
       rawValue.toId ||
-        rawValue.userId ||
-        rawValue.friendId ||
-        rawValue.to ||
-        rawValue.target ||
-        rawValue.friend ||
-        rawValue.userName ||
-        rawValue.name ||
-        rawValue.fromId
+      rawValue.userId ||
+      rawValue.friendId ||
+      rawValue.to ||
+      rawValue.target ||
+      rawValue.friend ||
+      rawValue.userName ||
+      rawValue.name ||
+      rawValue.fromId
     );
   }
   return normalizeName(rawValue);
@@ -1167,12 +1156,7 @@ async function ensureUserRegistrationState(userName, socketId = null) {
     }
 
     await User.findOneAndUpdate(
-      {
-        $or: [
-          { userName: cleanName },
-          { userId: cleanName }
-        ]
-      },
+      { $or: [{ userName: cleanName }, { userId: cleanName }] },
       {
         $set: updateData,
         $setOnInsert: {
@@ -1198,10 +1182,7 @@ async function validateUserReadyForMatchmaking(userName, socket) {
     if (!socket || !socket.id) return { ok: false, reason: "missing_socket" };
 
     const dbUser = await User.findOne({
-      $or: [
-        { userName: me },
-        { userId: me }
-      ]
+      $or: [{ userName: me }, { userId: me }]
     })
       .select("socketId online isBanned banExpiresAt deviceId banReason banLevel")
       .lean();
@@ -1363,6 +1344,11 @@ function createPendingRandomCall(caller, callee) {
       await emitToUser(pending.callee, "random_call_ended", {
         reason: "no_answer"
       });
+
+      await clearRandomVoiceRelationship(pending.caller, pending.callee, {
+        restartUsers: true,
+        notifyClosed: false
+      });
     } catch (err) {
       logInfo("Error", "Random call timeout cleanup failed", err);
     }
@@ -1422,6 +1408,112 @@ async function clearCallStateForUser(userName, reason = "ended") {
   }
 }
 
+function shouldRestartSearchAfterRandomCallReason(reason) {
+  return (
+    reason === "ended" ||
+    reason === "rejected" ||
+    reason === "no_answer" ||
+    reason === "partner_disconnected" ||
+    reason === "caller_cancelled" ||
+    reason === "partner_left"
+  );
+}
+
+async function clearRandomVoiceRelationship(userA, userB, options = {}) {
+  const a = normalizeName(userA);
+  const b = normalizeName(userB);
+  if (!a || !b) return;
+
+  const {
+    restartUsers = false,
+    notifyClosed = false,
+    reason = "ended"
+  } = options;
+
+  removeFromQueue(a, "voice");
+  removeFromQueue(b, "voice");
+
+  const activeA = activeMatches.get(a);
+  const activeB = activeMatches.get(b);
+
+  if (activeA === b || activeB === a) {
+    activeMatches.delete(a);
+    activeMatches.delete(b);
+  }
+
+  const pendingKey = pendingMatchByUser.get(a) || pendingMatchByUser.get(b);
+  if (pendingKey) {
+    const proposal = pendingMatches.get(pendingKey);
+    if (proposal) {
+      const involvesPair =
+        [proposal.userA, proposal.userB].includes(a) &&
+        [proposal.userA, proposal.userB].includes(b);
+
+      if (involvesPair) {
+        if (proposal.timeoutId) {
+          clearTimeout(proposal.timeoutId);
+        }
+        pendingMatches.delete(pendingKey);
+        pendingMatchByUser.delete(proposal.userA);
+        pendingMatchByUser.delete(proposal.userB);
+      }
+    }
+  }
+
+  unlockUserSearch(a);
+  unlockUserSearch(b);
+  clearVoiceMatchGrace(a);
+  clearVoiceMatchGrace(b);
+  clearRecentVoicePartnerPair(a, b);
+
+  await deletePendingFriendRequestsBetween(a, b);
+
+  if (notifyClosed) {
+    await emitToUser(a, "match_closed", { reason });
+    await emitToUser(b, "match_closed", { reason });
+  }
+
+  if (restartUsers) {
+    await restartSearchForUser(a);
+    await restartSearchForUser(b);
+  }
+}
+
+async function activateRandomCallPair(caller, callee) {
+  const a = normalizeName(caller);
+  const b = normalizeName(callee);
+  if (!a || !b || a === b) return false;
+
+  const pendingKey = pendingRandomCallByUser.get(a) || pendingRandomCallByUser.get(b);
+  if (pendingKey) {
+    const pending = pendingRandomCalls.get(pendingKey);
+    if (pending) {
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+      pendingRandomCalls.delete(pendingKey);
+      pendingRandomCallByUser.delete(pending.caller);
+      pendingRandomCallByUser.delete(pending.callee);
+    } else {
+      pendingRandomCallByUser.delete(a);
+      pendingRandomCallByUser.delete(b);
+    }
+  }
+
+  activeRandomCalls.set(a, b);
+  activeRandomCalls.set(b, a);
+
+  clearVoiceMatchGrace(a);
+  clearVoiceMatchGrace(b);
+
+  await emitToUser(a, "random_call_accepted", { by: b });
+  await emitToUser(a, "random_call_connected", { with: b });
+  await emitToUser(b, "random_call_connected", { with: a });
+
+  logInfo("Call", `Random call auto-connected between ${a} and ${b}`);
+  return true;
+}
+
 async function clearRandomCallStateForUser(userName, reason = "ended") {
   const me = normalizeName(userName);
   if (!me) return;
@@ -1430,13 +1522,22 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
   if (activePartner) {
     activeRandomCalls.delete(me);
     activeRandomCalls.delete(activePartner);
+
     unlockUserSearch(me);
     unlockUserSearch(activePartner);
+
     clearVoiceMatchGrace(me);
     clearVoiceMatchGrace(activePartner);
     clearRecentVoicePartnerPair(me, activePartner);
+
     await emitToUser(activePartner, "random_call_ended", { reason });
     await emitToUser(me, "random_call_ended", { reason });
+
+    await clearRandomVoiceRelationship(me, activePartner, {
+      restartUsers: shouldRestartSearchAfterRandomCallReason(reason),
+      notifyClosed: false,
+      reason
+    });
   }
 
   const pendingKey = pendingRandomCallByUser.get(me);
@@ -1452,6 +1553,7 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       pendingRandomCalls.delete(pendingKey);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
+
       unlockUserSearch(me);
       unlockUserSearch(other);
       clearVoiceMatchGrace(me);
@@ -1460,6 +1562,12 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
 
       await emitToUser(other, "random_call_ended", { reason });
       await emitToUser(me, "random_call_ended", { reason });
+
+      await clearRandomVoiceRelationship(me, other, {
+        restartUsers: shouldRestartSearchAfterRandomCallReason(reason),
+        notifyClosed: false,
+        reason
+      });
     } else {
       pendingRandomCallByUser.delete(me);
       unlockUserSearch(me);
@@ -1488,6 +1596,7 @@ async function forceRefreshUserSocketState(userName) {
 async function restartSearchForUser(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return;
+  if (hasUserSearchStopped(cleanName)) return;
 
   if (
     isUserUnavailableForMatch(cleanName) ||
@@ -1895,12 +2004,7 @@ async function banUserNow(userName, reason, durationMs, level = 1) {
   const expiresAt = new Date(now.getTime() + durationMs);
 
   const user = await User.findOneAndUpdate(
-    {
-      $or: [
-        { userName: cleanName },
-        { userId: cleanName }
-      ]
-    },
+    { $or: [{ userName: cleanName }, { userId: cleanName }] },
     {
       $set: {
         isBanned: true,
@@ -1978,15 +2082,8 @@ async function processUserReport(reporterId, reportedUserId) {
   await Report.create({ reporter, reported });
 
   const user = await User.findOneAndUpdate(
-    {
-      $or: [
-        { userName: reported },
-        { userId: reported }
-      ]
-    },
-    {
-      $inc: { reports: 1 }
-    },
+    { $or: [{ userName: reported }, { userId: reported }] },
+    { $inc: { reports: 1 } },
     { returnDocument: "after" }
   ).lean();
 
@@ -2021,6 +2118,7 @@ async function processUserReport(reporterId, reportedUserId) {
 async function tryMatch(userName, requestedChatType = null) {
   const me = normalizeName(userName);
   if (!me) return;
+  if (hasUserSearchStopped(me)) return;
 
   if (!acquireMatchLock(me)) {
     return;
@@ -2071,6 +2169,11 @@ async function tryMatch(userName, requestedChatType = null) {
     for (let i = 0; i < queue.length; i++) {
       const candidate = normalizeName(queue[i]);
       if (!candidate || candidate === me) continue;
+      if (hasUserSearchStopped(candidate)) {
+        queue.splice(i, 1);
+        i--;
+        continue;
+      }
 
       if (!acquireMatchLock(candidate)) {
         continue;
@@ -2095,6 +2198,7 @@ async function tryMatch(userName, requestedChatType = null) {
         if (
           partnerSocket &&
           candidateChatType === chatType &&
+          !hasUserSearchStopped(candidate) &&
           !isUserUnavailableForMatch(candidate) &&
           !isUserInVoiceTransition(candidate)
         ) {
@@ -2213,10 +2317,7 @@ io.on("connection", (socket) => {
       }
 
       const existingUser = await User.findOne({
-        $or: [
-          { userName },
-          { userId: userName }
-        ]
+        $or: [{ userName }, { userId: userName }]
       }).select("socketId deviceId").lean();
 
       if (existingUser?.socketId && existingUser.socketId !== socket.id) {
@@ -2242,12 +2343,7 @@ io.on("connection", (socket) => {
       userSearchPreferences.set(userName, preservedChatType);
 
       await User.findOneAndUpdate(
-        {
-          $or: [
-            { userName },
-            { userId: userName }
-          ]
-        },
+        { $or: [{ userName }, { userId: userName }] },
         {
           $set: {
             userName,
@@ -2421,12 +2517,7 @@ io.on("connection", (socket) => {
       }
 
       const updatedUser = await User.findOneAndUpdate(
-        {
-          $or: [
-            { userName: me },
-            { userId: me }
-          ]
-        },
+        { $or: [{ userName: me }, { userId: me }] },
         { $set: updateFields },
         { returnDocument: "after" }
       ).lean();
@@ -2484,6 +2575,7 @@ io.on("connection", (socket) => {
       const cleanMe = normalizeName(me);
       const chatType = normalizeChatType(payload?.chatType);
 
+      clearUserSearchStopped(cleanMe);
       setUserPreferredChatType(cleanMe, chatType, socket);
 
       logInfo("Matchmaking", `find_partner received`, {
@@ -2535,6 +2627,9 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ==========================================
+  // stop_search الآن محلي فقط ولا يؤثر على الشريك
+  // ==========================================
   socket.on("stop_search", async (payload) => {
     try {
       const me = socket.data.userName;
@@ -2546,39 +2641,14 @@ io.on("connection", (socket) => {
       setUserPreferredChatType(me, requestedChatType, socket);
 
       const cleanMe = normalizeName(me);
-      const wasInQueue = isUserInQueue(cleanMe, requestedChatType);
-      const hadPendingMatch = pendingMatchByUser.has(cleanMe);
-      const hadActiveMatch = activeMatches.has(cleanMe);
+      markUserSearchStopped(cleanMe);
 
-      if (wasInQueue && !hadPendingMatch && !hadActiveMatch) {
-        removeFromQueue(cleanMe, requestedChatType);
-        unlockUserSearch(cleanMe);
-
-        socket.emit("search_stopped", {
-          success: true,
-          mode: "queue_only",
-          chatType: requestedChatType
-        });
-
-        return;
-      }
-
-      if (!hadPendingMatch && !hadActiveMatch) {
-        unlockUserSearch(cleanMe);
-
-        socket.emit("search_stopped", {
-          success: true,
-          mode: "self_only",
-          chatType: requestedChatType
-        });
-        return;
-      }
-
-      await clearUserBusyState(me, "partner_stopped_search", requestedChatType);
+      removeFromQueue(cleanMe, requestedChatType);
+      unlockUserSearch(cleanMe);
 
       socket.emit("search_stopped", {
         success: true,
-        mode: "relationship_state",
+        mode: "self_only",
         chatType: requestedChatType
       });
     } catch (err) {
@@ -2740,6 +2810,7 @@ io.on("connection", (socket) => {
         payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
       );
       const myChatType = setUserPreferredChatType(me, requestedChatType, socket);
+      clearUserSearchStopped(me);
 
       const pendingKey = pendingMatchByUser.get(me);
 
@@ -2905,10 +2976,7 @@ io.on("connection", (socket) => {
 
     try {
       const targetUser = await User.findOne({
-        $or: [
-          { userName: to },
-          { userId: to }
-        ]
+        $or: [{ userName: to }, { userId: to }]
       }).select("_id userName userId displayName").lean();
 
       if (!targetUser) {
@@ -3147,11 +3215,11 @@ io.on("connection", (socket) => {
       const me = socket.data.userName;
       const other = extractTargetName(
         data?.toId ||
-          data?.friendId ||
-          data?.to ||
-          data?.friend ||
-          data?.with ||
-          data?.userName
+        data?.friendId ||
+        data?.to ||
+        data?.friend ||
+        data?.with ||
+        data?.userName
       );
 
       if (!me || !other) {
@@ -3412,12 +3480,7 @@ io.on("connection", (socket) => {
       if (targetSocket?.id) {
         userToSocket.set(to, targetSocket.id);
         await User.findOneAndUpdate(
-          {
-            $or: [
-              { userName: to },
-              { userId: to }
-            ]
-          },
+          { $or: [{ userName: to }, { userId: to }] },
           {
             $set: {
               socketId: targetSocket.id,
@@ -3600,6 +3663,9 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ==========================================
+  // مكالمة عشوائية صوتية - تبدأ فورًا بعد المطابقة
+  // ==========================================
   socket.on("start_random_call", async (data) => {
     try {
       const me = socket.data.userName;
@@ -3645,24 +3711,24 @@ io.on("connection", (socket) => {
         graceTo: hasVoiceMatchGrace(to)
       });
 
-     const myChatType = getUserPreferredChatType(me);
-const partnerChatType = getUserPreferredChatType(to);
+      const myChatType = getUserPreferredChatType(me);
+      const partnerChatType = getUserPreferredChatType(to);
 
-if (myChatType !== "voice" || partnerChatType !== "voice") {
-  return socket.emit("error_msg", {
-    message: "Random voice call requires voice match"
-  });
-}
+      if (myChatType !== "voice" || partnerChatType !== "voice") {
+        return socket.emit("error_msg", {
+          message: "Random voice call requires voice match"
+        });
+      }
 
-if (!shouldInitiateRandomCall(me, to)) {
-  logInfo("DEBUG_CALL", "start_random_call blocked because caller is not initiator", {
-    from: me,
-    to
-  });
-  return;
-}
+      if (!shouldInitiateRandomCall(me, to)) {
+        logInfo("DEBUG_CALL", "start_random_call blocked because caller is not initiator", {
+          from: me,
+          to
+        });
+        return;
+      }
 
-const targetSocket = await getUserSocket(to);
+      const targetSocket = await getUserSocket(to);
       if (!targetSocket) {
         return socket.emit("random_call_offline", { to });
       }
@@ -3676,29 +3742,17 @@ const targetSocket = await getUserSocket(to);
       lockUserSearch(me);
       lockUserSearch(to);
 
-      // نحافظ على grace والشريك المؤقت حتى قبول المكالمة
       setVoiceMatchGrace(me);
       setVoiceMatchGrace(to);
       setRecentVoicePartner(me, to);
 
-      createPendingRandomCall(me, to);
-
-      const myProfile = await getFullUserProfile(me);
-
-      const incomingCallPayload = {
-        from: myProfile?.userName || me,
-        fromId: me,
-        friendId: me,
-        friendName: myProfile?.userName || me,
-      };
-
-      targetSocket.emit("incoming_random_call", incomingCallPayload);
-      socket.emit("random_call_ringing", { to });
+      await activateRandomCallPair(me, to);
 
       logInfo("Call", `Outgoing random call from ${me} to ${to}`, {
         chatType: "voice",
         directMatch: isStillMatched,
-        graceTransition: isInGraceTransition
+        graceTransition: isInGraceTransition,
+        autoStart: true
       });
     } catch (err) {
       logInfo("Error", "start_random_call failed", err);
@@ -3706,11 +3760,19 @@ const targetSocket = await getUserSocket(to);
     }
   });
 
+  // إبقاء الحدث للتوافق الخلفي فقط
   socket.on("accept_random_call", async (data) => {
     try {
       const me = socket.data.userName;
       const from = extractTargetName(data);
       if (!me || !from) return;
+
+      const alreadyActive = activeRandomCalls.get(me);
+      if (alreadyActive === from) {
+        await emitToUser(from, "random_call_connected", { with: me });
+        await emitToUser(me, "random_call_connected", { with: from });
+        return;
+      }
 
       const key = pendingRandomCallByUser.get(me);
       if (!key) return;
@@ -3724,31 +3786,7 @@ const targetSocket = await getUserSocket(to);
 
       if (!validPair) return;
 
-      if (pending.timeoutId) {
-        clearTimeout(pending.timeoutId);
-      }
-
-      pendingRandomCalls.delete(key);
-      pendingRandomCallByUser.delete(pending.caller);
-      pendingRandomCallByUser.delete(pending.callee);
-
-      clearVoiceMatchGrace(pending.caller);
-      clearVoiceMatchGrace(pending.callee);
-
-      activeRandomCalls.set(pending.caller, pending.callee);
-      activeRandomCalls.set(pending.callee, pending.caller);
-
-      await emitToUser(pending.caller, "random_call_accepted", {
-        by: pending.callee
-      });
-      await emitToUser(pending.caller, "random_call_connected", {
-        with: pending.callee
-      });
-      await emitToUser(pending.callee, "random_call_connected", {
-        with: pending.caller
-      });
-
-      logInfo("Call", `Random call connected between ${pending.caller} and ${pending.callee}`);
+      await activateRandomCallPair(pending.caller, pending.callee);
     } catch (err) {
       logInfo("Error", "accept_random_call failed", err);
     }
@@ -3787,6 +3825,12 @@ const targetSocket = await getUserSocket(to);
 
       await emitToUser(from, "random_call_rejected", { by: me });
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
+
+      await clearRandomVoiceRelationship(pending.caller, pending.callee, {
+        restartUsers: true,
+        notifyClosed: false,
+        reason: "rejected"
+      });
     } catch (err) {
       logInfo("Error", "reject_random_call failed", err);
     }
@@ -3934,12 +3978,7 @@ const targetSocket = await getUserSocket(to);
         userToSocket.delete(me);
 
         await User.findOneAndUpdate(
-          {
-            $or: [
-              { userName: me },
-              { userId: me }
-            ]
-          },
+          { $or: [{ userName: me }, { userId: me }] },
           {
             $set: {
               online: false,
