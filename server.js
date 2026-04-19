@@ -297,7 +297,12 @@ function logInfo(scope, message, extra = undefined) {
     }
   }
 }
-
+function shouldInitiateRandomCall(userA, userB) {
+  const a = normalizeName(userA);
+  const b = normalizeName(userB);
+  if (!a || !b) return true;
+  return a <= b;
+}
 function normalizeName(value) {
   if (!value) return "";
   return String(value).trim().toLowerCase();
