@@ -2523,10 +2523,14 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("leave_chat", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+ if (isUserInVoiceTransition(me)) {
+  logInfo("DEBUG", "leave_chat ignored during voice transition", {
+    user: me,
+    socketId: socket.id,
+    chatType: requestedChatType,
+  });
+  return;
+}
 
       const requestedChatType = normalizeChatType(
         payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
@@ -3530,25 +3534,36 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("start_random_call", async (data) => {
-    try {
-      const me = socket.data.userName;
-      let to = extractTargetName(data);
+ const matchedPartner = activeMatches.get(me);
 
-      if (!me) return;
+if (!to) {
+  to = matchedPartner || "";
+}
 
-      const matchedPartner = activeMatches.get(me);
-      if (!to) {
-        to = matchedPartner || "";
-      }
+if (!to || me === to) return;
 
-      if (!to || me === to) return;
+// ✅ السماح بالمكالمة حتى لو تم حذف match مؤقتًا
+const isStillMatched =
+  matchedPartner === to && activeMatches.get(to) === me;
 
-      if (matchedPartner !== to || activeMatches.get(to) !== me) {
-        return socket.emit("error_msg", {
-          message: "Random voice call is not available for this user"
-        });
-      }
+const isInGraceTransition =
+  hasVoiceMatchGrace(me) && hasVoiceMatchGrace(to);
+
+if (!isStillMatched && !isInGraceTransition) {
+  return socket.emit("error_msg", {
+    message: "Random voice call is not available for this user"
+  });
+}
+
+// DEBUG مهم
+logInfo("DEBUG_CALL", "start_random_call attempt", {
+  from: me,
+  to,
+  matchedPartner,
+  reverseMatch: activeMatches.get(to),
+  graceMe: hasVoiceMatchGrace(me),
+  graceTo: hasVoiceMatchGrace(to)
+});
 
       const myChatType = getUserPreferredChatType(me);
       const partnerChatType = getUserPreferredChatType(to);
@@ -3572,8 +3587,7 @@ io.on("connection", (socket) => {
       removeFromQueue(to);
       lockUserSearch(me);
       lockUserSearch(to);
-      clearVoiceMatchGrace(me);
-      clearVoiceMatchGrace(to);
+      
       createPendingRandomCall(me, to);
 
       const myProfile = await getFullUserProfile(me);
