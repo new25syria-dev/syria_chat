@@ -3645,16 +3645,24 @@ io.on("connection", (socket) => {
         graceTo: hasVoiceMatchGrace(to)
       });
 
-      const myChatType = getUserPreferredChatType(me);
-      const partnerChatType = getUserPreferredChatType(to);
+     const myChatType = getUserPreferredChatType(me);
+const partnerChatType = getUserPreferredChatType(to);
 
-      if (myChatType !== "voice" || partnerChatType !== "voice") {
-        return socket.emit("error_msg", {
-          message: "Random voice call requires voice match"
-        });
-      }
+if (myChatType !== "voice" || partnerChatType !== "voice") {
+  return socket.emit("error_msg", {
+    message: "Random voice call requires voice match"
+  });
+}
 
-      const targetSocket = await getUserSocket(to);
+if (!shouldInitiateRandomCall(me, to)) {
+  logInfo("DEBUG_CALL", "start_random_call blocked because caller is not initiator", {
+    from: me,
+    to
+  });
+  return;
+}
+
+const targetSocket = await getUserSocket(to);
       if (!targetSocket) {
         return socket.emit("random_call_offline", { to });
       }
