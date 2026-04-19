@@ -278,6 +278,9 @@ const pendingRandomCallByUser = new Map();
 const voiceMatchGrace = new Map();
 const VOICE_MATCH_GRACE_MS = 20000;
 
+// جديد: حفظ آخر شريك صوتي مؤقتًا أثناء الانتقال لشاشة المكالمة
+const recentVoicePartners = new Map();
+
 // ==========================================
 // 4. دوال مساعدة
 // ==========================================
@@ -397,6 +400,43 @@ function hasVoiceMatchGrace(userName) {
   }
 
   return true;
+}
+
+// جديد: إدارة آخر شريك صوتي خلال فترة السماح
+function setRecentVoicePartner(userA, userB) {
+  const a = normalizeName(userA);
+  const b = normalizeName(userB);
+  if (!a || !b || a === b) return;
+
+  const expiresAt = Date.now() + VOICE_MATCH_GRACE_MS;
+  recentVoicePartners.set(a, { partner: b, expiresAt });
+  recentVoicePartners.set(b, { partner: a, expiresAt });
+}
+
+function getRecentVoicePartner(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return "";
+
+  const entry = recentVoicePartners.get(cleanName);
+  if (!entry) return "";
+
+  if (Date.now() > entry.expiresAt) {
+    recentVoicePartners.delete(cleanName);
+    return "";
+  }
+
+  return normalizeName(entry.partner);
+}
+
+function clearRecentVoicePartner(userName) {
+  const cleanName = normalizeName(userName);
+  if (!cleanName) return;
+  recentVoicePartners.delete(cleanName);
+}
+
+function clearRecentVoicePartnerPair(userA, userB) {
+  clearRecentVoicePartner(userA);
+  clearRecentVoicePartner(userB);
 }
 
 function sanitizeText(value, maxLength = 2000) {
@@ -550,7 +590,7 @@ function isUserInVoiceTransition(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return false;
   if (!hasVoiceMatchGrace(cleanName)) return false;
-  if (!activeMatches.has(cleanName)) return false;
+  if (!activeMatches.has(cleanName) && !getRecentVoicePartner(cleanName)) return false;
   if (activeRandomCalls.has(cleanName) || pendingRandomCallByUser.has(cleanName)) {
     return false;
   }
@@ -1227,6 +1267,7 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
       unlockUserSearch(proposal.userB);
       clearVoiceMatchGrace(proposal.userA);
       clearVoiceMatchGrace(proposal.userB);
+      clearRecentVoicePartnerPair(proposal.userA, proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1310,6 +1351,7 @@ function createPendingRandomCall(caller, callee) {
       unlockUserSearch(pending.callee);
       clearVoiceMatchGrace(pending.caller);
       clearVoiceMatchGrace(pending.callee);
+      clearRecentVoicePartnerPair(pending.caller, pending.callee);
 
       await emitToUser(pending.caller, "random_call_ended", {
         reason: "no_answer"
@@ -1388,6 +1430,7 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
     unlockUserSearch(activePartner);
     clearVoiceMatchGrace(me);
     clearVoiceMatchGrace(activePartner);
+    clearRecentVoicePartnerPair(me, activePartner);
     await emitToUser(activePartner, "random_call_ended", { reason });
     await emitToUser(me, "random_call_ended", { reason });
   }
@@ -1409,6 +1452,7 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       unlockUserSearch(other);
       clearVoiceMatchGrace(me);
       clearVoiceMatchGrace(other);
+      clearRecentVoicePartnerPair(me, other);
 
       await emitToUser(other, "random_call_ended", { reason });
       await emitToUser(me, "random_call_ended", { reason });
@@ -1416,10 +1460,14 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       pendingRandomCallByUser.delete(me);
       unlockUserSearch(me);
       clearVoiceMatchGrace(me);
+      clearRecentVoicePartner(me);
     }
   } else if (!activeRandomCalls.has(me)) {
     clearVoiceMatchGrace(me);
     unlockUserSearch(me);
+    if (reason !== "left_chat" && reason !== "partner_stopped_search") {
+      clearRecentVoicePartner(me);
+    }
   }
 }
 
@@ -1505,6 +1553,11 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       reason,
     });
 
+    // احتفظ بالشريك الصوتي مؤقتًا إذا كانت مطابقة صوتية
+    if (getUserPreferredChatType(me) === "voice" || safeChatType === "voice") {
+      setRecentVoicePartner(me, activePartner);
+    }
+
     activeMatches.delete(me);
     activeMatches.delete(activePartner);
     unlockUserSearch(me);
@@ -1545,6 +1598,7 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       unlockUserSearch(proposal.userB);
       clearVoiceMatchGrace(proposal.userA);
       clearVoiceMatchGrace(proposal.userB);
+      clearRecentVoicePartnerPair(proposal.userA, proposal.userB);
 
       await deletePendingFriendRequestsBetween(proposal.userA, proposal.userB);
 
@@ -1562,6 +1616,7 @@ async function clearUserBusyState(userName, reason = "state_cleared", chatType =
       pendingMatchByUser.delete(me);
       unlockUserSearch(me);
       clearVoiceMatchGrace(me);
+      clearRecentVoicePartner(me);
     }
     return;
   }
@@ -1580,6 +1635,7 @@ async function clearRelationshipRuntimeState(userA, userB) {
   unlockUserSearch(b);
   clearVoiceMatchGrace(a);
   clearVoiceMatchGrace(b);
+  clearRecentVoicePartnerPair(a, b);
 
   await deletePendingFriendRequestsBetween(a, b);
 
@@ -1626,11 +1682,13 @@ async function clearRelationshipRuntimeState(userA, userB) {
         unlockUserSearch(proposalA.userB);
         clearVoiceMatchGrace(proposalA.userA);
         clearVoiceMatchGrace(proposalA.userB);
+        clearRecentVoicePartnerPair(proposalA.userA, proposalA.userB);
       }
     } else {
       pendingMatchByUser.delete(a);
       unlockUserSearch(a);
       clearVoiceMatchGrace(a);
+      clearRecentVoicePartner(a);
     }
   }
 
@@ -1653,11 +1711,13 @@ async function clearRelationshipRuntimeState(userA, userB) {
         unlockUserSearch(proposalB.userB);
         clearVoiceMatchGrace(proposalB.userA);
         clearVoiceMatchGrace(proposalB.userB);
+        clearRecentVoicePartnerPair(proposalB.userA, proposalB.userB);
       }
     } else {
       pendingMatchByUser.delete(b);
       unlockUserSearch(b);
       clearVoiceMatchGrace(b);
+      clearRecentVoicePartner(b);
     }
   }
 
@@ -1701,6 +1761,7 @@ async function clearRelationshipRuntimeState(userA, userB) {
         unlockUserSearch(pendingRandomCall.callee);
         clearVoiceMatchGrace(pendingRandomCall.caller);
         clearVoiceMatchGrace(pendingRandomCall.callee);
+        clearRecentVoicePartnerPair(pendingRandomCall.caller, pendingRandomCall.callee);
       }
     }
   }
@@ -2598,9 +2659,11 @@ io.on("connection", (socket) => {
         if (proposal.chatType === "voice") {
           setVoiceMatchGrace(proposal.userA);
           setVoiceMatchGrace(proposal.userB);
+          setRecentVoicePartner(proposal.userA, proposal.userB);
         } else {
           clearVoiceMatchGrace(proposal.userA);
           clearVoiceMatchGrace(proposal.userB);
+          clearRecentVoicePartnerPair(proposal.userA, proposal.userB);
         }
 
         logInfo("DEBUG", "match state stored", {
@@ -2612,6 +2675,8 @@ io.on("connection", (socket) => {
           lockedB: isUserLocked(proposal.userB),
           graceA: hasVoiceMatchGrace(proposal.userA),
           graceB: hasVoiceMatchGrace(proposal.userB),
+          recentA: getRecentVoicePartner(proposal.userA) || null,
+          recentB: getRecentVoicePartner(proposal.userB) || null,
         });
 
         const profileA = await getFullUserProfile(proposal.userA);
@@ -2692,6 +2757,7 @@ io.on("connection", (socket) => {
           unlockUserSearch(other);
           clearVoiceMatchGrace(me);
           clearVoiceMatchGrace(other);
+          clearRecentVoicePartnerPair(me, other);
 
           await deletePendingFriendRequestsBetween(me, other);
 
@@ -2720,6 +2786,7 @@ io.on("connection", (socket) => {
         unlockUserSearch(partner);
         clearVoiceMatchGrace(me);
         clearVoiceMatchGrace(partner);
+        clearRecentVoicePartnerPair(me, partner);
 
         await deletePendingFriendRequestsBetween(me, partner);
         await clearRandomCallStateForUser(me, "ended");
@@ -3538,13 +3605,27 @@ io.on("connection", (socket) => {
       if (!me) return;
 
       const matchedPartner = activeMatches.get(me);
+      const recentPartner = getRecentVoicePartner(me);
+
       if (!to) {
-        to = matchedPartner || "";
+        to = matchedPartner || recentPartner || "";
       }
 
       if (!to || me === to) return;
 
-      if (matchedPartner !== to || activeMatches.get(to) !== me) {
+      const reverseMatchedPartner = activeMatches.get(to);
+      const reverseRecentPartner = getRecentVoicePartner(to);
+
+      const hasDirectActiveMatch =
+        matchedPartner === to && reverseMatchedPartner === me;
+
+      const hasGracePair =
+        hasVoiceMatchGrace(me) &&
+        hasVoiceMatchGrace(to) &&
+        recentPartner === to &&
+        reverseRecentPartner === me;
+
+      if (!hasDirectActiveMatch && !hasGracePair) {
         return socket.emit("error_msg", {
           message: "Random voice call is not available for this user"
         });
@@ -3572,8 +3653,12 @@ io.on("connection", (socket) => {
       removeFromQueue(to);
       lockUserSearch(me);
       lockUserSearch(to);
-      clearVoiceMatchGrace(me);
-      clearVoiceMatchGrace(to);
+
+      // لا تسمح بزوال معلومات الانتقال قبل بدء المكالمة
+      setVoiceMatchGrace(me);
+      setVoiceMatchGrace(to);
+      setRecentVoicePartner(me, to);
+
       createPendingRandomCall(me, to);
 
       const myProfile = await getFullUserProfile(me);
@@ -3589,7 +3674,9 @@ io.on("connection", (socket) => {
       socket.emit("random_call_ringing", { to });
 
       logInfo("Call", `Outgoing random call from ${me} to ${to}`, {
-        chatType: "voice"
+        chatType: "voice",
+        directMatch: hasDirectActiveMatch,
+        gracePair: hasGracePair
       });
     } catch (err) {
       logInfo("Error", "start_random_call failed", err);
@@ -3622,8 +3709,11 @@ io.on("connection", (socket) => {
       pendingRandomCalls.delete(key);
       pendingRandomCallByUser.delete(pending.caller);
       pendingRandomCallByUser.delete(pending.callee);
-      clearVoiceMatchGrace(pending.caller);
-      clearVoiceMatchGrace(pending.callee);
+
+      // الإبقاء على معلومات الشريك حتى تستقر المكالمة
+      setVoiceMatchGrace(pending.caller);
+      setVoiceMatchGrace(pending.callee);
+      setRecentVoicePartner(pending.caller, pending.callee);
 
       activeRandomCalls.set(pending.caller, pending.callee);
       activeRandomCalls.set(pending.callee, pending.caller);
@@ -3673,6 +3763,7 @@ io.on("connection", (socket) => {
       unlockUserSearch(pending.callee);
       clearVoiceMatchGrace(pending.caller);
       clearVoiceMatchGrace(pending.callee);
+      clearRecentVoicePartnerPair(pending.caller, pending.callee);
 
       await emitToUser(from, "random_call_rejected", { by: me });
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
@@ -3884,81 +3975,3 @@ app.get("/health", async (req, res) => {
 app.get("/ban-status", async (req, res) => {
   try {
     const userId = normalizeName(req.query.userId || req.query.userName || "");
-    const deviceId = normalizeClientId(req.query.deviceId || "");
-
-    const activeBan = await getActiveBanState({ userName: userId, deviceId });
-
-    if (!activeBan) {
-      return res.json({
-        isBanned: false,
-        reason: "",
-        level: 0,
-        expiresAt: null,
-        remainingMs: 0
-      });
-    }
-
-    return res.json(activeBan);
-  } catch (err) {
-    logInfo("BAN", "GET /ban-status failed", err);
-    return res.status(500).json({
-      isBanned: false,
-      reason: "",
-      level: 0,
-      expiresAt: null,
-      remainingMs: 0
-    });
-  }
-});
-
-app.post("/report-user", async (req, res) => {
-  try {
-    const { reporterId, reportedUserId } = req.body;
-
-    const result = await processUserReport(reporterId, reportedUserId);
-
-    if (!result.success) {
-      return res.status(400).json(result);
-    }
-
-    return res.json(result);
-  } catch (err) {
-    logInfo("ERROR", "Report system failed", err);
-    res.status(500).json({ success: false, error: "Server error" });
-  }
-});
-
-// ==========================================
-// 8. تشغيل السيرفر
-// ==========================================
-
-async function startMasterServer() {
-  try {
-    logInfo("System", "Initializing database connection...");
-
-    await mongoose.connect(DATABASE_URL, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 10000
-    });
-
-    logInfo("System", "Database connection established.");
-
-    server.listen(PORT, "0.0.0.0", () => {
-      logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
-      logInfo("System", "Ready to receive connections from Flutter app.");
-    });
-  } catch (err) {
-    logInfo("Critical", "Failed to start Master Server", err);
-    process.exit(1);
-  }
-}
-
-startMasterServer();
-
-process.on("unhandledRejection", (reason) => {
-  logInfo("Critical", "Unhandled Promise Rejection detected", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  logInfo("Critical", "Uncaught Exception detected! System remains stable.", err);
-});
