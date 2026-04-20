@@ -925,6 +925,100 @@ async function getFullUserProfile(userName) {
   }
 }
 
+function buildCallUserPayload(profile, fallbackId, fallbackName = "") {
+  const safeId = normalizeName(profile?.userId || fallbackId);
+  const safeName =
+    sanitizeOptionalString(profile?.userName || fallbackName || fallbackId, 120) ||
+    safeId;
+  const safeImage = sanitizeProfileImage(profile?.profileImage || "");
+
+  return {
+    userId: safeId,
+    userName: safeName,
+    displayName: safeName,
+    profileImage: safeImage,
+  };
+}
+
+function buildPrivateCallPayloadForReceiver(callerProfile, callerId) {
+  const caller = buildCallUserPayload(callerProfile, callerId, callerId);
+  return {
+    from: caller.userName,
+    fromId: caller.userId,
+    friendId: caller.userId,
+    friendName: caller.userName,
+    partnerId: caller.userId,
+    partnerName: caller.userName,
+    profileImage: caller.profileImage,
+    friendProfileImage: caller.profileImage,
+    partnerProfileImage: caller.profileImage,
+  };
+}
+
+function buildPrivateCallAcceptedPayload(otherProfile, otherId) {
+  const other = buildCallUserPayload(otherProfile, otherId, otherId);
+  return {
+    by: other.userId,
+    byId: other.userId,
+    with: other.userId,
+    withId: other.userId,
+    friendId: other.userId,
+    friendName: other.userName,
+    partnerId: other.userId,
+    partnerName: other.userName,
+    profileImage: other.profileImage,
+    friendProfileImage: other.profileImage,
+    partnerProfileImage: other.profileImage,
+  };
+}
+
+function buildPrivateCallConnectedPayload(otherProfile, otherId) {
+  const other = buildCallUserPayload(otherProfile, otherId, otherId);
+  return {
+    with: other.userId,
+    withId: other.userId,
+    friendId: other.userId,
+    friendName: other.userName,
+    partnerId: other.userId,
+    partnerName: other.userName,
+    profileImage: other.profileImage,
+    friendProfileImage: other.profileImage,
+    partnerProfileImage: other.profileImage,
+  };
+}
+
+function buildRandomIncomingPayload(callerProfile, callerId) {
+  const caller = buildCallUserPayload(callerProfile, callerId, callerId);
+  return {
+    from: caller.userName,
+    fromId: caller.userId,
+    friendId: caller.userId,
+    friendName: caller.userName,
+    partnerId: caller.userId,
+    partnerName: caller.userName,
+    profileImage: caller.profileImage,
+    friendProfileImage: caller.profileImage,
+    partnerProfileImage: caller.profileImage,
+  };
+}
+
+function buildRandomConnectedPayload(otherProfile, otherId) {
+  const other = buildCallUserPayload(otherProfile, otherId, otherId);
+  return {
+    with: other.userId,
+    withId: other.userId,
+    by: other.userId,
+    byId: other.userId,
+    friendId: other.userId,
+    friendName: other.userName,
+    partnerId: other.userId,
+    partnerName: other.userName,
+    profileImage: other.profileImage,
+    friendProfileImage: other.profileImage,
+    partnerProfileImage: other.profileImage,
+  };
+}
+
 async function resolveUserByAnyIdentifier(userName) {
   try {
     const cleanName = normalizeName(userName);
@@ -1338,12 +1432,8 @@ function createPendingRandomCall(caller, callee) {
       clearVoiceMatchGrace(pending.callee);
       clearRecentVoicePartnerPair(pending.caller, pending.callee);
 
-      await emitToUser(pending.caller, "random_call_ended", {
-        reason: "no_answer"
-      });
-      await emitToUser(pending.callee, "random_call_ended", {
-        reason: "no_answer"
-      });
+      await emitToUser(pending.caller, "random_call_ended", { reason: "no_answer" });
+      await emitToUser(pending.callee, "random_call_ended", { reason: "no_answer" });
 
       await clearRandomVoiceRelationship(pending.caller, pending.callee, {
         restartUsers: true,
@@ -1373,12 +1463,22 @@ async function clearCallStateForUser(userName, reason = "ended") {
 
   const activePartner = activeCalls.get(me);
   if (activePartner) {
+    const myProfile = await getFullUserProfile(me);
+    const partnerProfile = await getFullUserProfile(activePartner);
+
     activeCalls.delete(me);
     activeCalls.delete(activePartner);
     unlockUserSearch(me);
     unlockUserSearch(activePartner);
-    await emitToUser(activePartner, "call_ended", { reason });
-    await emitToUser(me, "call_ended", { reason });
+
+    await emitToUser(activePartner, "call_ended", {
+      reason,
+      ...buildPrivateCallConnectedPayload(myProfile, me)
+    });
+    await emitToUser(me, "call_ended", {
+      reason,
+      ...buildPrivateCallConnectedPayload(partnerProfile, activePartner)
+    });
   }
 
   const pendingKey = pendingCallByUser.get(me);
@@ -1390,6 +1490,8 @@ async function clearCallStateForUser(userName, reason = "ended") {
       }
 
       const other = pending.caller === me ? pending.callee : pending.caller;
+      const myProfile = await getFullUserProfile(me);
+      const otherProfile = await getFullUserProfile(other);
 
       pendingCalls.delete(pendingKey);
       pendingCallByUser.delete(pending.caller);
@@ -1397,8 +1499,14 @@ async function clearCallStateForUser(userName, reason = "ended") {
       unlockUserSearch(me);
       unlockUserSearch(other);
 
-      await emitToUser(other, "call_ended", { reason });
-      await emitToUser(me, "call_ended", { reason });
+      await emitToUser(other, "call_ended", {
+        reason,
+        ...buildPrivateCallConnectedPayload(myProfile, me)
+      });
+      await emitToUser(me, "call_ended", {
+        reason,
+        ...buildPrivateCallConnectedPayload(otherProfile, other)
+      });
     } else {
       pendingCallByUser.delete(me);
       unlockUserSearch(me);
@@ -1509,29 +1617,9 @@ async function activateRandomCallPair(caller, callee) {
   const profileA = await getFullUserProfile(a);
   const profileB = await getFullUserProfile(b);
 
-  await emitToUser(a, "random_call_accepted", {
-    by: b,
-    partnerName: profileB?.userName || b,
-    partnerId: profileB?.userId || b,
-    partnerProfileImage: profileB?.profileImage || "",
-    profileImage: profileB?.profileImage || ""
-  });
-
-  await emitToUser(a, "random_call_connected", {
-    with: b,
-    partnerName: profileB?.userName || b,
-    partnerId: profileB?.userId || b,
-    partnerProfileImage: profileB?.profileImage || "",
-    profileImage: profileB?.profileImage || ""
-  });
-
-  await emitToUser(b, "random_call_connected", {
-    with: a,
-    partnerName: profileA?.userName || a,
-    partnerId: profileA?.userId || a,
-    partnerProfileImage: profileA?.profileImage || "",
-    profileImage: profileA?.profileImage || ""
-  });
+  await emitToUser(a, "random_call_accepted", buildRandomConnectedPayload(profileB, b));
+  await emitToUser(a, "random_call_connected", buildRandomConnectedPayload(profileB, b));
+  await emitToUser(b, "random_call_connected", buildRandomConnectedPayload(profileA, a));
 
   logInfo("Call", `Random call auto-connected between ${a} and ${b}`);
   return true;
@@ -1543,6 +1631,9 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
 
   const activePartner = activeRandomCalls.get(me);
   if (activePartner) {
+    const myProfile = await getFullUserProfile(me);
+    const partnerProfile = await getFullUserProfile(activePartner);
+
     activeRandomCalls.delete(me);
     activeRandomCalls.delete(activePartner);
 
@@ -1553,8 +1644,14 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
     clearVoiceMatchGrace(activePartner);
     clearRecentVoicePartnerPair(me, activePartner);
 
-    await emitToUser(activePartner, "random_call_ended", { reason });
-    await emitToUser(me, "random_call_ended", { reason });
+    await emitToUser(activePartner, "random_call_ended", {
+      reason,
+      ...buildRandomConnectedPayload(myProfile, me)
+    });
+    await emitToUser(me, "random_call_ended", {
+      reason,
+      ...buildRandomConnectedPayload(partnerProfile, activePartner)
+    });
 
     await clearRandomVoiceRelationship(me, activePartner, {
       restartUsers: shouldRestartSearchAfterRandomCallReason(reason),
@@ -1572,6 +1669,8 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       }
 
       const other = pending.caller === me ? pending.callee : pending.caller;
+      const myProfile = await getFullUserProfile(me);
+      const otherProfile = await getFullUserProfile(other);
 
       pendingRandomCalls.delete(pendingKey);
       pendingRandomCallByUser.delete(pending.caller);
@@ -1583,8 +1682,14 @@ async function clearRandomCallStateForUser(userName, reason = "ended") {
       clearVoiceMatchGrace(other);
       clearRecentVoicePartnerPair(me, other);
 
-      await emitToUser(other, "random_call_ended", { reason });
-      await emitToUser(me, "random_call_ended", { reason });
+      await emitToUser(other, "random_call_ended", {
+        reason,
+        ...buildRandomConnectedPayload(myProfile, me)
+      });
+      await emitToUser(me, "random_call_ended", {
+        reason,
+        ...buildRandomConnectedPayload(otherProfile, other)
+      });
 
       await clearRandomVoiceRelationship(me, other, {
         restartUsers: shouldRestartSearchAfterRandomCallReason(reason),
@@ -2650,9 +2755,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ==========================================
-  // stop_search الآن محلي فقط ولا يؤثر على الشريك
-  // ==========================================
   socket.on("stop_search", async (payload) => {
     try {
       const me = socket.data.userName;
@@ -2697,8 +2799,6 @@ io.on("connection", (socket) => {
         pendingCallByUser.has(cleanMe) ||
         pendingRandomCallByUser.has(cleanMe);
 
-      // إذا كان في صفحة التطابق فقط، ألغِ التطابق للطرفين
-      // وأعد الطرف الآخر للبحث مباشرة
       if (hasPendingOrActiveMatch && !isInsideCall) {
         await clearUserBusyState(cleanMe, "partner_stopped_search", requestedChatType);
 
@@ -2710,7 +2810,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // إذا كان داخل مكالمة أو خارج أي علاقة، أوقف البحث لهذا المستخدم فقط
       removeFromQueue(cleanMe, requestedChatType);
       unlockUserSearch(cleanMe);
 
@@ -3498,15 +3597,9 @@ io.on("connection", (socket) => {
       lockUserSearch(to);
 
       const myProfile = await getFullUserProfile(me);
+      const targetProfile = await getFullUserProfile(to);
 
-      const incomingCallPayload = {
-        from: myProfile?.userName || me,
-        fromId: me,
-        friendId: me,
-        friendName: myProfile?.userName || me,
-        profileImage: myProfile?.profileImage || "",
-        friendProfileImage: myProfile?.profileImage || "",
-      };
+      const incomingCallPayload = buildPrivateCallPayloadForReceiver(myProfile, me);
 
       if (targetSocket?.id) {
         userToSocket.set(to, targetSocket.id);
@@ -3524,7 +3617,18 @@ io.on("connection", (socket) => {
       }
 
       targetSocket.emit("incoming_call", incomingCallPayload);
-      socket.emit("call_ringing", { to });
+
+      socket.emit("call_ringing", {
+        to,
+        toId: to,
+        friendId: to,
+        friendName: targetProfile?.userName || to,
+        partnerId: to,
+        partnerName: targetProfile?.userName || to,
+        profileImage: targetProfile?.profileImage || "",
+        friendProfileImage: targetProfile?.profileImage || "",
+        partnerProfileImage: targetProfile?.profileImage || "",
+      });
 
       logInfo("Call", `Outgoing private call from ${me} to ${to}`);
     } catch (err) {
@@ -3562,9 +3666,26 @@ io.on("connection", (socket) => {
       activeCalls.set(pending.caller, pending.callee);
       activeCalls.set(pending.callee, pending.caller);
 
-      await emitToUser(pending.caller, "call_accepted", { by: pending.callee });
-      await emitToUser(pending.caller, "call_connected", { with: pending.callee });
-      await emitToUser(pending.callee, "call_connected", { with: pending.caller });
+      const callerProfile = await getFullUserProfile(pending.caller);
+      const calleeProfile = await getFullUserProfile(pending.callee);
+
+      await emitToUser(
+        pending.caller,
+        "call_accepted",
+        buildPrivateCallAcceptedPayload(calleeProfile, pending.callee)
+      );
+
+      await emitToUser(
+        pending.caller,
+        "call_connected",
+        buildPrivateCallConnectedPayload(calleeProfile, pending.callee)
+      );
+
+      await emitToUser(
+        pending.callee,
+        "call_connected",
+        buildPrivateCallConnectedPayload(callerProfile, pending.caller)
+      );
 
       logInfo(
         "Call",
@@ -3603,7 +3724,17 @@ io.on("connection", (socket) => {
       unlockUserSearch(pending.caller);
       unlockUserSearch(pending.callee);
 
-      await emitToUser(from, "call_rejected", { by: me });
+      const rejectorProfile = await getFullUserProfile(me);
+
+      await emitToUser(from, "call_rejected", {
+        by: me,
+        byId: me,
+        partnerId: me,
+        partnerName: rejectorProfile?.userName || me,
+        profileImage: rejectorProfile?.profileImage || "",
+        partnerProfileImage: rejectorProfile?.profileImage || "",
+      });
+
       await emitToUser(me, "call_ended", { reason: "rejected" });
     } catch (err) {
       logInfo("Error", "reject_private_call failed", err);
@@ -3694,9 +3825,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ==========================================
-  // مكالمة عشوائية صوتية - تبدأ فورًا بعد المطابقة
-  // ==========================================
   socket.on("start_random_call", async (data) => {
     try {
       const me = socket.data.userName;
@@ -3777,6 +3905,26 @@ io.on("connection", (socket) => {
       setVoiceMatchGrace(to);
       setRecentVoicePartner(me, to);
 
+      const myProfile = await getFullUserProfile(me);
+      const targetProfile = await getFullUserProfile(to);
+
+      targetSocket.emit(
+        "incoming_random_call",
+        buildRandomIncomingPayload(myProfile, me)
+      );
+
+      socket.emit("random_call_ringing", {
+        to,
+        toId: to,
+        friendId: to,
+        friendName: targetProfile?.userName || to,
+        partnerId: to,
+        partnerName: targetProfile?.userName || to,
+        profileImage: targetProfile?.profileImage || "",
+        friendProfileImage: targetProfile?.profileImage || "",
+        partnerProfileImage: targetProfile?.profileImage || "",
+      });
+
       await activateRandomCallPair(me, to);
 
       logInfo("Call", `Outgoing random call from ${me} to ${to}`, {
@@ -3791,7 +3939,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // إبقاء الحدث للتوافق الخلفي فقط
   socket.on("accept_random_call", async (data) => {
     try {
       const me = socket.data.userName;
@@ -3800,24 +3947,11 @@ io.on("connection", (socket) => {
 
       const alreadyActive = activeRandomCalls.get(me);
       if (alreadyActive === from) {
-        const meProfile = await getFullUserProfile(me);
-        const fromProfile = await getFullUserProfile(from);
+        const myProfile = await getFullUserProfile(me);
+        const otherProfile = await getFullUserProfile(from);
 
-        await emitToUser(from, "random_call_connected", {
-          with: me,
-          partnerName: meProfile?.userName || me,
-          partnerId: meProfile?.userId || me,
-          partnerProfileImage: meProfile?.profileImage || "",
-          profileImage: meProfile?.profileImage || ""
-        });
-
-        await emitToUser(me, "random_call_connected", {
-          with: from,
-          partnerName: fromProfile?.userName || from,
-          partnerId: fromProfile?.userId || from,
-          partnerProfileImage: fromProfile?.profileImage || "",
-          profileImage: fromProfile?.profileImage || ""
-        });
+        await emitToUser(from, "random_call_connected", buildRandomConnectedPayload(myProfile, me));
+        await emitToUser(me, "random_call_connected", buildRandomConnectedPayload(otherProfile, from));
         return;
       }
 
@@ -3870,7 +4004,17 @@ io.on("connection", (socket) => {
       clearVoiceMatchGrace(pending.callee);
       clearRecentVoicePartnerPair(pending.caller, pending.callee);
 
-      await emitToUser(from, "random_call_rejected", { by: me });
+      const rejectorProfile = await getFullUserProfile(me);
+
+      await emitToUser(from, "random_call_rejected", {
+        by: me,
+        byId: me,
+        partnerId: me,
+        partnerName: rejectorProfile?.userName || me,
+        profileImage: rejectorProfile?.profileImage || "",
+        partnerProfileImage: rejectorProfile?.profileImage || "",
+      });
+
       await emitToUser(me, "random_call_ended", { reason: "rejected" });
 
       await clearRandomVoiceRelationship(pending.caller, pending.callee, {
@@ -3891,6 +4035,9 @@ io.on("connection", (socket) => {
       const partner = activeRandomCalls.get(me) || null;
 
       if (partner) {
+        const myProfile = await getFullUserProfile(me);
+        const partnerProfile = await getFullUserProfile(partner);
+
         activeRandomCalls.delete(me);
         activeRandomCalls.delete(partner);
 
@@ -3905,14 +4052,16 @@ io.on("connection", (socket) => {
           reason: "ended",
           from: me,
           partnerId: me,
-          to: partner
+          to: partner,
+          ...buildRandomConnectedPayload(myProfile, me)
         });
 
         await emitToUser(me, "random_call_ended", {
           reason: "ended",
           from: me,
           partnerId: partner,
-          to: partner
+          to: partner,
+          ...buildRandomConnectedPayload(partnerProfile, partner)
         });
 
         await clearRandomVoiceRelationship(me, partner, {
