@@ -1506,9 +1506,32 @@ async function activateRandomCallPair(caller, callee) {
   clearVoiceMatchGrace(a);
   clearVoiceMatchGrace(b);
 
-  await emitToUser(a, "random_call_accepted", { by: b });
-  await emitToUser(a, "random_call_connected", { with: b });
-  await emitToUser(b, "random_call_connected", { with: a });
+  const profileA = await getFullUserProfile(a);
+  const profileB = await getFullUserProfile(b);
+
+  await emitToUser(a, "random_call_accepted", {
+    by: b,
+    partnerName: profileB?.userName || b,
+    partnerId: profileB?.userId || b,
+    partnerProfileImage: profileB?.profileImage || "",
+    profileImage: profileB?.profileImage || ""
+  });
+
+  await emitToUser(a, "random_call_connected", {
+    with: b,
+    partnerName: profileB?.userName || b,
+    partnerId: profileB?.userId || b,
+    partnerProfileImage: profileB?.profileImage || "",
+    profileImage: profileB?.profileImage || ""
+  });
+
+  await emitToUser(b, "random_call_connected", {
+    with: a,
+    partnerName: profileA?.userName || a,
+    partnerId: profileA?.userId || a,
+    partnerProfileImage: profileA?.profileImage || "",
+    profileImage: profileA?.profileImage || ""
+  });
 
   logInfo("Call", `Random call auto-connected between ${a} and ${b}`);
   return true;
@@ -2630,30 +2653,64 @@ io.on("connection", (socket) => {
   // ==========================================
   // stop_search الآن محلي فقط ولا يؤثر على الشريك
   // ==========================================
-socket.on("stop_search", async (payload) => {
-  try {
-    const me = socket.data.userName;
-    if (!me) return;
+  socket.on("stop_search", async (payload) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
 
-    const requestedChatType = normalizeChatType(
-      payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-    );
+      const requestedChatType = normalizeChatType(
+        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
+      );
 
-    setUserPreferredChatType(me, requestedChatType, socket);
+      setUserPreferredChatType(me, requestedChatType, socket);
 
-    const cleanMe = normalizeName(me);
-    markUserSearchStopped(cleanMe);
+      const cleanMe = normalizeName(me);
+      markUserSearchStopped(cleanMe);
 
-    const isInQueueOnly =
-      isUserInQueue(cleanMe, requestedChatType) &&
-      !pendingMatchByUser.has(cleanMe) &&
-      !activeMatches.has(cleanMe) &&
-      !activeCalls.has(cleanMe) &&
-      !activeRandomCalls.has(cleanMe) &&
-      !pendingCallByUser.has(cleanMe) &&
-      !pendingRandomCallByUser.has(cleanMe);
+      const isInQueueOnly =
+        isUserInQueue(cleanMe, requestedChatType) &&
+        !pendingMatchByUser.has(cleanMe) &&
+        !activeMatches.has(cleanMe) &&
+        !activeCalls.has(cleanMe) &&
+        !activeRandomCalls.has(cleanMe) &&
+        !pendingCallByUser.has(cleanMe) &&
+        !pendingRandomCallByUser.has(cleanMe);
 
-    if (isInQueueOnly) {
+      if (isInQueueOnly) {
+        removeFromQueue(cleanMe, requestedChatType);
+        unlockUserSearch(cleanMe);
+
+        socket.emit("search_stopped", {
+          success: true,
+          mode: "self_only",
+          chatType: requestedChatType
+        });
+        return;
+      }
+
+      const hasPendingOrActiveMatch =
+        pendingMatchByUser.has(cleanMe) || activeMatches.has(cleanMe);
+
+      const isInsideCall =
+        activeCalls.has(cleanMe) ||
+        activeRandomCalls.has(cleanMe) ||
+        pendingCallByUser.has(cleanMe) ||
+        pendingRandomCallByUser.has(cleanMe);
+
+      // إذا كان في صفحة التطابق فقط، ألغِ التطابق للطرفين
+      // وأعد الطرف الآخر للبحث مباشرة
+      if (hasPendingOrActiveMatch && !isInsideCall) {
+        await clearUserBusyState(cleanMe, "partner_stopped_search", requestedChatType);
+
+        socket.emit("search_stopped", {
+          success: true,
+          mode: "relationship_state",
+          chatType: requestedChatType
+        });
+        return;
+      }
+
+      // إذا كان داخل مكالمة أو خارج أي علاقة، أوقف البحث لهذا المستخدم فقط
       removeFromQueue(cleanMe, requestedChatType);
       unlockUserSearch(cleanMe);
 
@@ -2662,45 +2719,11 @@ socket.on("stop_search", async (payload) => {
         mode: "self_only",
         chatType: requestedChatType
       });
-      return;
+    } catch (err) {
+      logInfo("Error", "stop_search failed", err);
+      socket.emit("error_msg", { message: "Failed to stop search" });
     }
-
-    const hasPendingOrActiveMatch =
-      pendingMatchByUser.has(cleanMe) || activeMatches.has(cleanMe);
-
-    const isInsideCall =
-      activeCalls.has(cleanMe) ||
-      activeRandomCalls.has(cleanMe) ||
-      pendingCallByUser.has(cleanMe) ||
-      pendingRandomCallByUser.has(cleanMe);
-
-    // إذا كان في صفحة التطابق فقط، ألغِ التطابق للطرفين
-    // وأعد الطرف الآخر للبحث مباشرة
-    if (hasPendingOrActiveMatch && !isInsideCall) {
-      await clearUserBusyState(cleanMe, "partner_stopped_search", requestedChatType);
-
-      socket.emit("search_stopped", {
-        success: true,
-        mode: "relationship_state",
-        chatType: requestedChatType
-      });
-      return;
-    }
-
-    // إذا كان داخل مكالمة أو خارج أي علاقة، أوقف البحث لهذا المستخدم فقط
-    removeFromQueue(cleanMe, requestedChatType);
-    unlockUserSearch(cleanMe);
-
-    socket.emit("search_stopped", {
-      success: true,
-      mode: "self_only",
-      chatType: requestedChatType
-    });
-  } catch (err) {
-    logInfo("Error", "stop_search failed", err);
-    socket.emit("error_msg", { message: "Failed to stop search" });
-  }
-});
+  });
 
   socket.on("accept_match", async (payload) => {
     try {
@@ -3481,6 +3504,8 @@ socket.on("stop_search", async (payload) => {
         fromId: me,
         friendId: me,
         friendName: myProfile?.userName || me,
+        profileImage: myProfile?.profileImage || "",
+        friendProfileImage: myProfile?.profileImage || "",
       };
 
       if (targetSocket?.id) {
@@ -3775,8 +3800,24 @@ socket.on("stop_search", async (payload) => {
 
       const alreadyActive = activeRandomCalls.get(me);
       if (alreadyActive === from) {
-        await emitToUser(from, "random_call_connected", { with: me });
-        await emitToUser(me, "random_call_connected", { with: from });
+        const meProfile = await getFullUserProfile(me);
+        const fromProfile = await getFullUserProfile(from);
+
+        await emitToUser(from, "random_call_connected", {
+          with: me,
+          partnerName: meProfile?.userName || me,
+          partnerId: meProfile?.userId || me,
+          partnerProfileImage: meProfile?.profileImage || "",
+          profileImage: meProfile?.profileImage || ""
+        });
+
+        await emitToUser(me, "random_call_connected", {
+          with: from,
+          partnerName: fromProfile?.userName || from,
+          partnerId: fromProfile?.userId || from,
+          partnerProfileImage: fromProfile?.profileImage || "",
+          profileImage: fromProfile?.profileImage || ""
+        });
         return;
       }
 
@@ -3842,52 +3883,52 @@ socket.on("stop_search", async (payload) => {
     }
   });
 
- socket.on("end_random_call", async () => {
-  try {
-    const me = socket.data.userName;
-    if (!me) return;
+  socket.on("end_random_call", async () => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
 
-    const partner = activeRandomCalls.get(me) || null;
+      const partner = activeRandomCalls.get(me) || null;
 
-    if (partner) {
-      activeRandomCalls.delete(me);
-      activeRandomCalls.delete(partner);
+      if (partner) {
+        activeRandomCalls.delete(me);
+        activeRandomCalls.delete(partner);
 
-      unlockUserSearch(me);
-      unlockUserSearch(partner);
+        unlockUserSearch(me);
+        unlockUserSearch(partner);
 
-      clearVoiceMatchGrace(me);
-      clearVoiceMatchGrace(partner);
-      clearRecentVoicePartnerPair(me, partner);
+        clearVoiceMatchGrace(me);
+        clearVoiceMatchGrace(partner);
+        clearRecentVoicePartnerPair(me, partner);
 
-      await emitToUser(partner, "random_call_ended", {
-        reason: "ended",
-        from: me,
-        partnerId: me,
-        to: partner
-      });
+        await emitToUser(partner, "random_call_ended", {
+          reason: "ended",
+          from: me,
+          partnerId: me,
+          to: partner
+        });
 
-      await emitToUser(me, "random_call_ended", {
-        reason: "ended",
-        from: me,
-        partnerId: partner,
-        to: partner
-      });
+        await emitToUser(me, "random_call_ended", {
+          reason: "ended",
+          from: me,
+          partnerId: partner,
+          to: partner
+        });
 
-      await clearRandomVoiceRelationship(me, partner, {
-        restartUsers: true,
-        notifyClosed: false,
-        reason: "ended"
-      });
+        await clearRandomVoiceRelationship(me, partner, {
+          restartUsers: true,
+          notifyClosed: false,
+          reason: "ended"
+        });
 
-      return;
+        return;
+      }
+
+      await clearRandomCallStateForUser(me, "ended");
+    } catch (err) {
+      logInfo("Error", "end_random_call failed", err);
     }
-
-    await clearRandomCallStateForUser(me, "ended");
-  } catch (err) {
-    logInfo("Error", "end_random_call failed", err);
-  }
-});
+  });
 
   socket.on("random_webrtc_offer", async (data) => {
     try {
