@@ -591,13 +591,14 @@ async function getFullUserProfile(userName) {
       gender: user.gender,
       lastSeen: user.lastSeen,
       online: user.online
+       } 
+  } 
     };
-  } catch (err) {
+
+  catch (err) {
     logInfo("DB", `Error fetching profile for ${userName}`, err);
     return null;
   }
-}
-}
 
 function isUserUnavailableForMatch(userName) {
   const cleanName = normalizeName(userName);
