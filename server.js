@@ -941,7 +941,7 @@ function buildCallUserPayload(profile, fallbackId, fallbackName = "") {
 }
 
 function buildPrivateCallPayloadForReceiver(callerProfile, callerId) {
-  const caller = buildCallUserPayload(callerProfile, callerId, callerId);
+  const caller = buildCallUserPayload(callerProfile, callerId, "");
   return {
     from: caller.userName,
     fromId: caller.userId,
@@ -956,7 +956,7 @@ function buildPrivateCallPayloadForReceiver(callerProfile, callerId) {
 }
 
 function buildPrivateCallAcceptedPayload(otherProfile, otherId) {
-  const other = buildCallUserPayload(otherProfile, otherId, otherId);
+  const other = buildCallUserPayload(otherProfile, otherId, "");
   return {
     by: other.userId,
     byId: other.userId,
@@ -973,7 +973,7 @@ function buildPrivateCallAcceptedPayload(otherProfile, otherId) {
 }
 
 function buildPrivateCallConnectedPayload(otherProfile, otherId) {
-  const other = buildCallUserPayload(otherProfile, otherId, otherId);
+  const other = buildCallUserPayload(otherProfile, otherId, "");
   return {
     with: other.userId,
     withId: other.userId,
@@ -3656,17 +3656,17 @@ io.on("connection", (socket) => {
 
       targetSocket.emit("incoming_call", incomingCallPayload);
 
-      socket.emit("call_ringing", {
-        to,
-        toId: to,
-        friendId: to,
-        friendName: targetProfile?.userName || to,
-        partnerId: to,
-        partnerName: targetProfile?.userName || to,
-        profileImage: targetProfile?.profileImage || "",
-        friendProfileImage: targetProfile?.profileImage || "",
-        partnerProfileImage: targetProfile?.profileImage || "",
-      });
+     socket.emit("call_ringing", {
+  to,
+  toId: to,
+  friendId: to,
+  friendName: targetProfile?.userName || "",
+  partnerId: to,
+  partnerName: targetProfile?.userName || "",
+  profileImage: targetProfile?.profileImage || "",
+  friendProfileImage: targetProfile?.profileImage || "",
+  partnerProfileImage: targetProfile?.profileImage || "",
+});
 
       logInfo("Call", `Outgoing private call from ${me} to ${to}`);
     } catch (err) {
