@@ -3768,7 +3768,7 @@ io.on("connection", (socket) => {
         by: me,
         byId: me,
         partnerId: me,
-        partnerName: rejectorProfile?.userName || me,
+        partnerName: rejectorProfile?.userName || "",
         profileImage: rejectorProfile?.profileImage || "",
         partnerProfileImage: rejectorProfile?.profileImage || "",
       });
