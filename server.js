@@ -2560,6 +2560,14 @@ io.on("connection", (socket) => {
       });
 
       await notifyFriendsStatusChanged(userName);
+            const friendsList = await getFriendsListForUser(userName);
+
+      socket.emit("friends_list", friendsList);
+
+      logInfo("Friends", "Friends list restored after login", {
+        userName,
+        count: friendsList.length
+      });
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
       socket.emit("error_msg", { message: "Registration process failed" });
