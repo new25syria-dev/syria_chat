@@ -596,12 +596,7 @@ async function getFullUserProfile(userName) {
     logInfo("DB", `Error fetching profile for ${userName}`, err);
     return null;
   }
-}
 
-  catch (err) {
-    logInfo("DB", `Error fetching profile for ${userName}`, err);
-    return null;
-  }
 
 function isUserUnavailableForMatch(userName) {
   const cleanName = normalizeName(userName);
