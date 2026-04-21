@@ -1198,7 +1198,37 @@ async function getFriendIdsForUser(userName) {
     return [];
   }
 }
+async function getFriendsListForUser(userName) {
+  try {
+    const friendIds = await getFriendIdsForUser(userName);
+    const friends = [];
 
+    for (const friendId of friendIds) {
+      const profile = await getFullUserProfile(friendId);
+      if (!profile) continue;
+
+      friends.push({
+        user: profile.userId,
+        userId: profile.userId,
+        friendId: profile.userId,
+        userName: profile.userName,
+        displayName: profile.userName,
+        profileImage: profile.profileImage || "",
+        country: profile.country || "",
+        age: profile.age ?? null,
+        bio: profile.bio || "",
+        gender: profile.gender || "unspecified",
+        online: profile.online === true,
+        lastSeen: profile.lastSeen || null
+      });
+    }
+
+    return friends;
+  } catch (err) {
+    logInfo("Friends", `Failed to build friends list for ${userName}`, err);
+    return [];
+  }
+}
 function extractTargetName(rawValue) {
   if (!rawValue) return "";
   if (typeof rawValue === "string") {
