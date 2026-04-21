@@ -566,36 +566,38 @@ function parseRegistrationPayload(rawPayload) {
   };
 }
 
-async function getFullUserProfile(userName) {
-  try {
-    const cleanName = normalizeName(userName);
-    if (!cleanName) return null;
+function publicDisplayName(userDoc) {
+  const display = normalizeDisplayName(userDoc?.displayName);
+  if (display) return display;
+  return normalizeDisplayName(userDoc?.userName);
+}
 
-    const user = await User.findOne({
-      $or: [{ userName: cleanName }, { userId: cleanName }]
-    }).lean();
+function publicUserId(userDoc) {
+  return normalizeName(userDoc?.userId || userDoc?.userName);
+}
 
-    if (!user) return null;
+function pairKey(a, b) {
+  const x = normalizeName(a);
+  const y = normalizeName(b);
+  return [x, y].sort().join("__");
+}
 
-    const canonicalId = publicUserId(user);
-    const displayName = publicDisplayName(user);
+function getQueueByChatType(chatType) {
+  return waitingQueues[normalizeChatType(chatType)] || waitingQueues.text;
+}
 
-    return {
-      userId: canonicalId,
-      userName: displayName || "User",
-      displayName: displayName || "User",
-      profileImage: sanitizeProfileImage(user.profileImage),
-      country: user.country,
-      age: user.age,
-      bio: user.bio,
-      gender: user.gender,
-      lastSeen: user.lastSeen,
-      online: user.online
-     };
-  } catch (err) {
-    logInfo("DB", `Error fetching profile for ${userName}`, err);
-    return null;
-  }
+function getAllQueueSizes() {
+  return Object.values(waitingQueues).reduce((sum, queue) => sum + queue.length, 0);
+}
+
+function isUserBusyForCall(userName) {
+  const cleanName = normalizeName(userName);
+  return (
+    activeCalls.has(cleanName) ||
+    pendingCallByUser.has(cleanName) ||
+    activeRandomCalls.has(cleanName) ||
+    pendingRandomCallByUser.has(cleanName)
+  );
 }
 
 function isUserUnavailableForMatch(userName) {
@@ -925,19 +927,9 @@ async function getFullUserProfile(userName) {
 
 function buildCallUserPayload(profile, fallbackId, fallbackName = "") {
   const safeId = normalizeName(profile?.userId || fallbackId);
-
-  const preferredName =
-    normalizeDisplayName(profile?.displayName) ||
-    normalizeDisplayName(profile?.userName) ||
-    normalizeDisplayName(fallbackName);
-
-  const safeName = sanitizeOptionalString(
-    preferredName && !normalizeName(preferredName).startsWith("uid_")
-      ? preferredName
-      : "User",
-    120
-  ) || "User";
-
+  const safeName =
+    sanitizeOptionalString(profile?.userName || fallbackName || fallbackId, 120) ||
+    safeId;
   const safeImage = sanitizeProfileImage(profile?.profileImage || "");
 
   return {
@@ -1178,37 +1170,6 @@ async function notifyFriendsStatusChanged(userName) {
         lastSeen: myStatus.lastSeen
       });
     }
-    async function getFriendsListForUser(userName) {
-  try {
-    const friendIds = await getFriendIdsForUser(userName);
-    const friends = [];
-
-    for (const friendId of friendIds) {
-      const profile = await getFullUserProfile(friendId);
-      if (!profile) continue;
-
-      friends.push({
-        user: profile.userId,
-        userId: profile.userId,
-        friendId: profile.userId,
-        userName: profile.userName,
-        displayName: profile.displayName,
-        profileImage: profile.profileImage || "",
-        country: profile.country || "",
-        age: profile.age ?? null,
-        bio: profile.bio || "",
-        gender: profile.gender || "unspecified",
-        online: profile.online === true,
-        lastSeen: profile.lastSeen || null
-      });
-    }
-
-    return friends;
-  } catch (err) {
-    logInfo("DB", `Failed to build friends list for ${userName}`, err);
-    return [];
-  }
-}
   } catch (err) {
     logInfo("Status", `Failed to notify friends status change for ${userName}`, err);
   }
@@ -2569,19 +2530,6 @@ io.on("connection", (socket) => {
       });
 
       await notifyFriendsStatusChanged(userName);
-            const friendsList = await getFriendsListForUser(userName);
-
-      socket.emit("friends_list", friendsList);
-      socket.emit("friends_restored", {
-        success: true,
-        count: friendsList.length,
-        friends: friendsList
-      });
-
-      logInfo("Friends", "Friends list restored after login", {
-        userName,
-        count: friendsList.length
-      });
     } catch (err) {
       logInfo("Error", "Registration process failed", err);
       socket.emit("error_msg", { message: "Registration process failed" });
@@ -3332,26 +3280,6 @@ io.on("connection", (socket) => {
           lastSeen: status.lastSeen
         });
       }
-        socket.on("get_friends_list", async () => {
-    try {
-      const me = socket.data.userName;
-      if (!me) {
-        return socket.emit("friends_list", []);
-      }
-
-      const friendsList = await getFriendsListForUser(me);
-
-      socket.emit("friends_list", friendsList);
-      socket.emit("friends_restored", {
-        success: true,
-        count: friendsList.length,
-        friends: friendsList
-      });
-    } catch (err) {
-      logInfo("Error", "Failed to get friends list", err);
-      socket.emit("friends_list", []);
-    }
-  });
     } catch (err) {
       logInfo("Error", "Failed to get_my_friends_status", err);
       socket.emit("error_msg", { message: "Failed to get friends status" });
