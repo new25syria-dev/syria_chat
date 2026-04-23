@@ -3692,65 +3692,83 @@ socket.on("start_private_call", async (data) => {
   }
 });
 
-  socket.on("accept_private_call", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const from = extractTargetName(data);
-      if (!me || !from) return;
+socket.on("accept_private_call", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const from = extractTargetName(data);
+    const requestedCallType = data?.callType === "video" ? "video" : "audio";
 
-      const key = pendingCallByUser.get(me);
-      if (!key) return;
+    if (!me || !from) return;
 
-      const pending = pendingCalls.get(key);
-      if (!pending) return;
+    const key = pendingCallByUser.get(me);
+    if (!key) return;
 
-      const validPair =
-        (pending.caller === from && pending.callee === me) ||
-        (pending.caller === me && pending.callee === from);
+    const pending = pendingCalls.get(key);
+    if (!pending) return;
 
-      if (!validPair) return;
+    const validPair =
+      (pending.caller === from && pending.callee === me) ||
+      (pending.caller === me && pending.callee === from);
 
-      if (pending.timeoutId) {
-        clearTimeout(pending.timeoutId);
-      }
+    if (!validPair) return;
 
-      pendingCalls.delete(key);
-      pendingCallByUser.delete(pending.caller);
-      pendingCallByUser.delete(pending.callee);
+    const callType =
+      pending.callType === "video" || requestedCallType === "video"
+        ? "video"
+        : "audio";
 
-      activeCalls.set(pending.caller, pending.callee);
-      activeCalls.set(pending.callee, pending.caller);
-
-      const callerProfile = await getFullUserProfile(pending.caller);
-      const calleeProfile = await getFullUserProfile(pending.callee);
-
-      await emitToUser(
-        pending.caller,
-        "call_accepted",
-        buildPrivateCallAcceptedPayload(calleeProfile, pending.callee)
-      );
-
-      await emitToUser(
-        pending.caller,
-        "call_connected",
-        buildPrivateCallConnectedPayload(calleeProfile, pending.callee)
-      );
-
-      await emitToUser(
-        pending.callee,
-        "call_connected",
-        buildPrivateCallConnectedPayload(callerProfile, pending.caller)
-      );
-
-      logInfo(
-        "Call",
-        `Private call connected between ${pending.caller} and ${pending.callee}`
-      );
-    } catch (err) {
-      logInfo("Error", "accept_private_call failed", err);
+    if (pending.timeoutId) {
+      clearTimeout(pending.timeoutId);
     }
-  });
 
+    pendingCalls.delete(key);
+    pendingCallByUser.delete(pending.caller);
+    pendingCallByUser.delete(pending.callee);
+
+    activeCalls.set(pending.caller, pending.callee);
+    activeCalls.set(pending.callee, pending.caller);
+
+    const callerProfile = await getFullUserProfile(pending.caller);
+    const calleeProfile = await getFullUserProfile(pending.callee);
+
+    await emitToUser(
+      pending.caller,
+      "call_accepted",
+      buildPrivateCallAcceptedPayload(
+        calleeProfile,
+        pending.callee,
+        callType
+      )
+    );
+
+    await emitToUser(
+      pending.caller,
+      "call_connected",
+      buildPrivateCallConnectedPayload(
+        calleeProfile,
+        pending.callee,
+        callType
+      )
+    );
+
+    await emitToUser(
+      pending.callee,
+      "call_connected",
+      buildPrivateCallConnectedPayload(
+        callerProfile,
+        pending.caller,
+        callType
+      )
+    );
+
+    logInfo(
+      "Call",
+      `Private ${callType} call connected between ${pending.caller} and ${pending.callee}`
+    );
+  } catch (err) {
+    logInfo("Error", "accept_private_call failed", err);
+  }
+});
   socket.on("reject_private_call", async (data) => {
     try {
       const me = socket.data.userName;
