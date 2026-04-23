@@ -1508,6 +1508,8 @@ async function clearCallStateForUser(userName, reason = "ended") {
     const myProfile = await getFullUserProfile(me);
     const partnerProfile = await getFullUserProfile(activePartner);
 
+    const activeCallType = "audio";
+
     activeCalls.delete(me);
     activeCalls.delete(activePartner);
     unlockUserSearch(me);
@@ -1515,11 +1517,16 @@ async function clearCallStateForUser(userName, reason = "ended") {
 
     await emitToUser(activePartner, "call_ended", {
       reason,
-      ...buildPrivateCallConnectedPayload(myProfile, me)
+      ...buildPrivateCallConnectedPayload(myProfile, me, activeCallType)
     });
+
     await emitToUser(me, "call_ended", {
       reason,
-      ...buildPrivateCallConnectedPayload(partnerProfile, activePartner)
+      ...buildPrivateCallConnectedPayload(
+        partnerProfile,
+        activePartner,
+        activeCallType
+      )
     });
   }
 
@@ -1534,6 +1541,7 @@ async function clearCallStateForUser(userName, reason = "ended") {
       const other = pending.caller === me ? pending.callee : pending.caller;
       const myProfile = await getFullUserProfile(me);
       const otherProfile = await getFullUserProfile(other);
+      const pendingCallType = pending.callType || "audio";
 
       pendingCalls.delete(pendingKey);
       pendingCallByUser.delete(pending.caller);
@@ -1543,11 +1551,12 @@ async function clearCallStateForUser(userName, reason = "ended") {
 
       await emitToUser(other, "call_ended", {
         reason,
-        ...buildPrivateCallConnectedPayload(myProfile, me)
+        ...buildPrivateCallConnectedPayload(myProfile, me, pendingCallType)
       });
+
       await emitToUser(me, "call_ended", {
         reason,
-        ...buildPrivateCallConnectedPayload(otherProfile, other)
+        ...buildPrivateCallConnectedPayload(otherProfile, other, pendingCallType)
       });
     } else {
       pendingCallByUser.delete(me);
