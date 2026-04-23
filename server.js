@@ -3903,17 +3903,30 @@ socket.on("webrtc_offer", async (data) => {
 
     if (!me || !to || !sdp || !type) return;
 
-    const activePartner = activeCalls.get(me);
-    if (activePartner !== to) {
+ socket.on("webrtc_ice_candidate", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const candidate = data?.candidate;
+    const callType = data?.callType === "video" ? "video" : "audio";
+
+    if (!me || !to || !candidate) return;
+
+    const activeCall = activeCalls.get(me);
+    if (!activeCall || activeCall.partner !== to) {
       return socket.emit("error_msg", { message: "Call is not active" });
     }
 
-    await emitToUser(to, "webrtc_answer", {
+    await emitToUser(to, "webrtc_ice_candidate", {
       from: me,
-      sdp,
-      type,
+      candidate,
       callType
     });
+  } catch (err) {
+    logInfo("Error", "webrtc_ice_candidate failed", err);
+    socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
+  }
+});
   } catch (err) {
     logInfo("Error", "webrtc_answer failed", err);
     socket.emit("error_msg", { message: "Failed to relay answer" });
