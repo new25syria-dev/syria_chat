@@ -1935,11 +1935,11 @@ async function clearRelationshipRuntimeState(userA, userB) {
 
   await deletePendingFriendRequestsBetween(a, b);
 
-  const activeA = activeMatches.get(a);
-  if (activeA === b) {
-    activeMatches.delete(a);
-    activeMatches.delete(b);
-  }
+const activeCallA = activeCalls.get(a);
+if (activeCallA && activeCallA.partner === b) {
+  activeCalls.delete(a);
+  activeCalls.delete(b);
+}
 
   const activeB = activeMatches.get(b);
   if (activeB === a) {
@@ -3896,7 +3896,7 @@ socket.on("webrtc_offer", async (data) => {
   }
 });
 
- socket.on("webrtc_answer", async (data) => {
+socket.on("webrtc_answer", async (data) => {
   try {
     const me = socket.data.userName;
     const to = extractTargetName(data);
@@ -3948,37 +3948,11 @@ socket.on("webrtc_ice_candidate", async (data) => {
   }
 });
   } catch (err) {
-    logInfo("Error", "webrtc_answer failed", err);
-    socket.emit("error_msg", { message: "Failed to relay answer" });
-  }
-});
-
-
-socket.on("webrtc_ice_candidate", async (data) => {
-  try {
-    const me = socket.data.userName;
-    const to = extractTargetName(data);
-    const candidate = data?.candidate;
-    const callType = data?.callType === "video" ? "video" : "audio";
-
-    if (!me || !to || !candidate) return;
-
-    const activePartner = activeCalls.get(me);
-    if (activePartner !== to) {
-      return socket.emit("error_msg", { message: "Call is not active" });
-    }
-
-    await emitToUser(to, "webrtc_ice_candidate", {
-      from: me,
-      candidate,
-      callType
-    });
-  } catch (err) {
     logInfo("Error", "webrtc_ice_candidate failed", err);
     socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
   }
 });
-
+ 
   socket.on("start_random_call", async (data) => {
     try {
       const me = socket.data.userName;
