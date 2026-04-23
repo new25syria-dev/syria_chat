@@ -3947,11 +3947,7 @@ socket.on("webrtc_ice_candidate", async (data) => {
     socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
   }
 });
-  } catch (err) {
-    logInfo("Error", "webrtc_ice_candidate failed", err);
-    socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
-  }
-});
+ 
  
   socket.on("start_random_call", async (data) => {
     try {
