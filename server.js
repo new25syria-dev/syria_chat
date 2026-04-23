@@ -3606,74 +3606,91 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("start_private_call", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const to = extractTargetName(data);
+socket.on("start_private_call", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const callType = data?.callType === "video" ? "video" : "audio";
 
-      if (!me || !to || me === to) return;
+    if (!me || !to || me === to) return;
 
-      const isFriend = await Friendship.findOne({
-        pairKey: pairKey(me, to)
-      }).lean();
+    const isFriend = await Friendship.findOne({
+      pairKey: pairKey(me, to)
+    }).lean();
 
-      if (!isFriend) {
-        return socket.emit("error_msg", { message: "Not friends yet" });
-      }
-
-      const targetSocket = await getUserSocket(to);
-      if (!targetSocket) {
-        return socket.emit("call_offline", { to });
-      }
-
-      if (isUserBusyForCall(me) || isUserBusyForCall(to)) {
-        return socket.emit("call_busy", { to });
-      }
-
-      createPendingCall(me, to);
-      lockUserSearch(me);
-      lockUserSearch(to);
-
-      const myProfile = await getFullUserProfile(me);
-      const targetProfile = await getFullUserProfile(to);
-
-      const incomingCallPayload = buildPrivateCallPayloadForReceiver(myProfile, me);
-
-      if (targetSocket?.id) {
-        userToSocket.set(to, targetSocket.id);
-        await User.findOneAndUpdate(
-          { $or: [{ userName: to }, { userId: to }] },
-          {
-            $set: {
-              socketId: targetSocket.id,
-              online: true,
-              lastSeen: new Date()
-            }
-          },
-          { returnDocument: "after" }
-        );
-      }
-
-      targetSocket.emit("incoming_call", incomingCallPayload);
-
-     socket.emit("call_ringing", {
-  to,
-  toId: to,
-  friendId: to,
-  friendName: targetProfile?.userName || "",
-  partnerId: to,
-  partnerName: targetProfile?.userName || "",
-  profileImage: targetProfile?.profileImage || "",
-  friendProfileImage: targetProfile?.profileImage || "",
-  partnerProfileImage: targetProfile?.profileImage || "",
-});
-
-      logInfo("Call", `Outgoing private call from ${me} to ${to}`);
-    } catch (err) {
-      logInfo("Error", "start_private_call failed", err);
-      socket.emit("error_msg", { message: "Failed to start call" });
+    if (!isFriend) {
+      return socket.emit("error_msg", { message: "Not friends yet" });
     }
-  });
+
+    const targetSocket = await getUserSocket(to);
+    if (!targetSocket) {
+      return socket.emit("call_offline", {
+        to,
+        toId: to,
+        callType
+      });
+    }
+
+    if (isUserBusyForCall(me) || isUserBusyForCall(to)) {
+      return socket.emit("call_busy", {
+        to,
+        toId: to,
+        callType
+      });
+    }
+
+    createPendingCall(me, to);
+    lockUserSearch(me);
+    lockUserSearch(to);
+
+    const myProfile = await getFullUserProfile(me);
+    const targetProfile = await getFullUserProfile(to);
+
+    const incomingCallPayload = buildPrivateCallPayloadForReceiver(
+      myProfile,
+      me,
+      callType
+    );
+
+    if (targetSocket?.id) {
+      userToSocket.set(to, targetSocket.id);
+      await User.findOneAndUpdate(
+        { $or: [{ userName: to }, { userId: to }] },
+        {
+          $set: {
+            socketId: targetSocket.id,
+            online: true,
+            lastSeen: new Date()
+          }
+        },
+        { returnDocument: "after" }
+      );
+    }
+
+    targetSocket.emit("incoming_call", incomingCallPayload);
+
+    socket.emit("call_ringing", {
+      to,
+      toId: to,
+      friendId: to,
+      friendName: targetProfile?.userName || "",
+      partnerId: to,
+      partnerName: targetProfile?.userName || "",
+      profileImage: targetProfile?.profileImage || "",
+      friendProfileImage: targetProfile?.profileImage || "",
+      partnerProfileImage: targetProfile?.profileImage || "",
+      callType
+    });
+
+    logInfo(
+      "Call",
+      `Outgoing private ${callType} call from ${me} to ${to}`
+    );
+  } catch (err) {
+    logInfo("Error", "start_private_call failed", err);
+    socket.emit("error_msg", { message: "Failed to start call" });
+  }
+});
 
   socket.on("accept_private_call", async (data) => {
     try {
