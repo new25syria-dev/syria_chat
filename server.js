@@ -1503,14 +1503,13 @@ async function clearCallStateForUser(userName, reason = "ended") {
   const me = normalizeName(userName);
   if (!me) return;
 
-const activeCall = activeCalls.get(me);
-if (activeCall) {
-  const activePartner = activeCall.partner;
-  const activeCallType = activeCall.callType || "audio";
+  const activeCall = activeCalls.get(me);
+  if (activeCall) {
+    const activePartner = activeCall.partner;
+    const activeCallType = activeCall.callType || "audio";
+
     const myProfile = await getFullUserProfile(me);
     const partnerProfile = await getFullUserProfile(activePartner);
-
-    const activeCallType = "audio";
 
     activeCalls.delete(me);
     activeCalls.delete(activePartner);
@@ -1558,7 +1557,11 @@ if (activeCall) {
 
       await emitToUser(me, "call_ended", {
         reason,
-        ...buildPrivateCallConnectedPayload(otherProfile, other, pendingCallType)
+        ...buildPrivateCallConnectedPayload(
+          otherProfile,
+          other,
+          pendingCallType
+        )
       });
     } else {
       pendingCallByUser.delete(me);
