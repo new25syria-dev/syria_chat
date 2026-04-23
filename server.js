@@ -269,7 +269,7 @@ const userToSocket = new Map();
 const matchmakingLocks = new Set();
 const MATCH_PROPOSAL_TTL = 30000;
 
-const activeCalls = new Map();
+const activeCalls = new Map(); // { userName: { partner: string, callType: string } }
 const pendingCalls = new Map();
 const pendingCallByUser = new Map();
 const CALL_RING_TIMEOUT = 30000;
@@ -1503,8 +1503,10 @@ async function clearCallStateForUser(userName, reason = "ended") {
   const me = normalizeName(userName);
   if (!me) return;
 
-  const activePartner = activeCalls.get(me);
-  if (activePartner) {
+const activeCall = activeCalls.get(me);
+if (activeCall) {
+  const activePartner = activeCall.partner;
+  const activeCallType = activeCall.callType || "audio";
     const myProfile = await getFullUserProfile(me);
     const partnerProfile = await getFullUserProfile(activePartner);
 
@@ -3746,8 +3748,15 @@ socket.on("accept_private_call", async (data) => {
     pendingCallByUser.delete(pending.caller);
     pendingCallByUser.delete(pending.callee);
 
-    activeCalls.set(pending.caller, pending.callee);
-    activeCalls.set(pending.callee, pending.caller);
+    activeCalls.set(pending.caller, {
+      partner: pending.callee,
+      callType
+    });
+
+    activeCalls.set(pending.callee, {
+      partner: pending.caller,
+      callType
+    });
 
     const callerProfile = await getFullUserProfile(pending.caller);
     const calleeProfile = await getFullUserProfile(pending.callee);
@@ -3857,7 +3866,7 @@ socket.on("accept_private_call", async (data) => {
     }
   });
 
- socket.on("webrtc_offer", async (data) => {
+socket.on("webrtc_offer", async (data) => {
   try {
     const me = socket.data.userName;
     const to = extractTargetName(data);
@@ -3867,8 +3876,8 @@ socket.on("accept_private_call", async (data) => {
 
     if (!me || !to || !sdp || !type) return;
 
-    const activePartner = activeCalls.get(me);
-    if (activePartner !== to) {
+    const activeCall = activeCalls.get(me);
+    if (!activeCall || activeCall.partner !== to) {
       return socket.emit("error_msg", { message: "Call is not active" });
     }
 
