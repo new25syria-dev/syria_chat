@@ -3893,7 +3893,7 @@ socket.on("webrtc_offer", async (data) => {
   }
 });
 
- socket.on("webrtc_answer", async (data) => {
+  socket.on("webrtc_answer", async (data) => {
   try {
     const me = socket.data.userName;
     const to = extractTargetName(data);
@@ -3932,6 +3932,7 @@ socket.on("webrtc_offer", async (data) => {
     socket.emit("error_msg", { message: "Failed to relay answer" });
   }
 });
+
 
 socket.on("webrtc_ice_candidate", async (data) => {
   try {
