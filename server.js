@@ -3872,53 +3872,57 @@ socket.on("accept_private_call", async (data) => {
   }
 });
 
-  socket.on("webrtc_answer", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const to = extractTargetName(data);
-      const sdp = data?.sdp;
-      const type = data?.type;
+ socket.on("webrtc_answer", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const sdp = data?.sdp;
+    const type = data?.type;
+    const callType = data?.callType === "video" ? "video" : "audio";
 
-      if (!me || !to || !sdp || !type) return;
+    if (!me || !to || !sdp || !type) return;
 
-      const activePartner = activeCalls.get(me);
-      if (activePartner !== to) {
-        return socket.emit("error_msg", { message: "Call is not active" });
-      }
-
-      await emitToUser(to, "webrtc_answer", {
-        from: me,
-        sdp,
-        type,
-      });
-    } catch (err) {
-      logInfo("Error", "webrtc_answer failed", err);
-      socket.emit("error_msg", { message: "Failed to relay answer" });
+    const activePartner = activeCalls.get(me);
+    if (activePartner !== to) {
+      return socket.emit("error_msg", { message: "Call is not active" });
     }
-  });
 
-  socket.on("webrtc_ice_candidate", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const to = extractTargetName(data);
-      const candidate = data?.candidate;
+    await emitToUser(to, "webrtc_answer", {
+      from: me,
+      sdp,
+      type,
+      callType
+    });
+  } catch (err) {
+    logInfo("Error", "webrtc_answer failed", err);
+    socket.emit("error_msg", { message: "Failed to relay answer" });
+  }
+});
 
-      if (!me || !to || !candidate) return;
+socket.on("webrtc_ice_candidate", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const candidate = data?.candidate;
+    const callType = data?.callType === "video" ? "video" : "audio";
 
-      const activePartner = activeCalls.get(me);
-      if (activePartner !== to) {
-        return socket.emit("error_msg", { message: "Call is not active" });
-      }
+    if (!me || !to || !candidate) return;
 
-      await emitToUser(to, "webrtc_ice_candidate", {
-        from: me,
-        candidate,
-      });
-    } catch (err) {
-      logInfo("Error", "webrtc_ice_candidate failed", err);
-      socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
+    const activePartner = activeCalls.get(me);
+    if (activePartner !== to) {
+      return socket.emit("error_msg", { message: "Call is not active" });
     }
-  });
+
+    await emitToUser(to, "webrtc_ice_candidate", {
+      from: me,
+      candidate,
+      callType
+    });
+  } catch (err) {
+    logInfo("Error", "webrtc_ice_candidate failed", err);
+    socket.emit("error_msg", { message: "Failed to relay ICE candidate" });
+  }
+});
 
   socket.on("start_random_call", async (data) => {
     try {
