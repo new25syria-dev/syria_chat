@@ -3845,30 +3845,32 @@ socket.on("accept_private_call", async (data) => {
     }
   });
 
-  socket.on("webrtc_offer", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const to = extractTargetName(data);
-      const sdp = data?.sdp;
-      const type = data?.type;
+ socket.on("webrtc_offer", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
+    const sdp = data?.sdp;
+    const type = data?.type;
+    const callType = data?.callType === "video" ? "video" : "audio";
 
-      if (!me || !to || !sdp || !type) return;
+    if (!me || !to || !sdp || !type) return;
 
-      const activePartner = activeCalls.get(me);
-      if (activePartner !== to) {
-        return socket.emit("error_msg", { message: "Call is not active" });
-      }
-
-      await emitToUser(to, "webrtc_offer", {
-        from: me,
-        sdp,
-        type,
-      });
-    } catch (err) {
-      logInfo("Error", "webrtc_offer failed", err);
-      socket.emit("error_msg", { message: "Failed to relay offer" });
+    const activePartner = activeCalls.get(me);
+    if (activePartner !== to) {
+      return socket.emit("error_msg", { message: "Call is not active" });
     }
-  });
+
+    await emitToUser(to, "webrtc_offer", {
+      from: me,
+      sdp,
+      type,
+      callType
+    });
+  } catch (err) {
+    logInfo("Error", "webrtc_offer failed", err);
+    socket.emit("error_msg", { message: "Failed to relay offer" });
+  }
+});
 
   socket.on("webrtc_answer", async (data) => {
     try {
