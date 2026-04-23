@@ -1411,8 +1411,9 @@ function createPendingMatchEntry(userA, userB, chatType = "text") {
   return key;
 }
 
-function createPendingCall(caller, callee) {
+function createPendingCall(caller, callee, callType = "audio") {
   const key = pairKey(caller, callee);
+  const normalizedCallType = callType === "video" ? "video" : "audio";
 
   const timeoutId = setTimeout(async () => {
     try {
@@ -1425,8 +1426,15 @@ function createPendingCall(caller, callee) {
       unlockUserSearch(pending.caller);
       unlockUserSearch(pending.callee);
 
-      await emitToUser(pending.caller, "call_ended", { reason: "no_answer" });
-      await emitToUser(pending.callee, "call_ended", { reason: "no_answer" });
+      await emitToUser(pending.caller, "call_ended", {
+        reason: "no_answer",
+        callType: pending.callType || "audio"
+      });
+
+      await emitToUser(pending.callee, "call_ended", {
+        reason: "no_answer",
+        callType: pending.callType || "audio"
+      });
     } catch (err) {
       logInfo("Error", "Call timeout cleanup failed", err);
     }
@@ -1435,6 +1443,7 @@ function createPendingCall(caller, callee) {
   pendingCalls.set(key, {
     caller: normalizeName(caller),
     callee: normalizeName(callee),
+    callType: normalizedCallType,
     timeoutId,
     createdAt: Date.now(),
   });
@@ -3769,50 +3778,61 @@ socket.on("accept_private_call", async (data) => {
     logInfo("Error", "accept_private_call failed", err);
   }
 });
-  socket.on("reject_private_call", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const from = extractTargetName(data);
-      if (!me || !from) return;
+ socket.on("reject_private_call", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const from = extractTargetName(data);
+    const requestedCallType = data?.callType === "video" ? "video" : "audio";
 
-      const key = pendingCallByUser.get(me);
-      if (!key) return;
+    if (!me || !from) return;
 
-      const pending = pendingCalls.get(key);
-      if (!pending) return;
+    const key = pendingCallByUser.get(me);
+    if (!key) return;
 
-      const validPair =
-        (pending.caller === from && pending.callee === me) ||
-        (pending.caller === me && pending.callee === from);
+    const pending = pendingCalls.get(key);
+    if (!pending) return;
 
-      if (!validPair) return;
+    const validPair =
+      (pending.caller === from && pending.callee === me) ||
+      (pending.caller === me && pending.callee === from);
 
-      if (pending.timeoutId) {
-        clearTimeout(pending.timeoutId);
-      }
+    if (!validPair) return;
 
-      pendingCalls.delete(key);
-      pendingCallByUser.delete(pending.caller);
-      pendingCallByUser.delete(pending.callee);
-      unlockUserSearch(pending.caller);
-      unlockUserSearch(pending.callee);
+    const callType =
+      pending.callType === "video" || requestedCallType === "video"
+        ? "video"
+        : "audio";
 
-      const rejectorProfile = await getFullUserProfile(me);
-
-      await emitToUser(from, "call_rejected", {
-        by: me,
-        byId: me,
-        partnerId: me,
-        partnerName: rejectorProfile?.userName || "",
-        profileImage: rejectorProfile?.profileImage || "",
-        partnerProfileImage: rejectorProfile?.profileImage || "",
-      });
-
-      await emitToUser(me, "call_ended", { reason: "rejected" });
-    } catch (err) {
-      logInfo("Error", "reject_private_call failed", err);
+    if (pending.timeoutId) {
+      clearTimeout(pending.timeoutId);
     }
-  });
+
+    pendingCalls.delete(key);
+    pendingCallByUser.delete(pending.caller);
+    pendingCallByUser.delete(pending.callee);
+    unlockUserSearch(pending.caller);
+    unlockUserSearch(pending.callee);
+
+    const rejectorProfile = await getFullUserProfile(me);
+
+    await emitToUser(from, "call_rejected", {
+      by: me,
+      byId: me,
+      partnerId: me,
+      partnerName: rejectorProfile?.userName || "",
+      profileImage: rejectorProfile?.profileImage || "",
+      partnerProfileImage: rejectorProfile?.profileImage || "",
+      callType
+    });
+
+    await emitToUser(me, "call_ended", {
+      reason: "rejected",
+      callType
+    });
+  } catch (err) {
+    logInfo("Error", "reject_private_call failed", err);
+  }
+});
 
   socket.on("end_private_call", async () => {
     try {
