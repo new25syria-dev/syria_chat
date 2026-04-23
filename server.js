@@ -1947,11 +1947,11 @@ async function clearRelationshipRuntimeState(userA, userB) {
     activeMatches.delete(b);
   }
 
-  const activeCallA = activeCalls.get(a);
-  if (activeCallA === b) {
-    activeCalls.delete(a);
-    activeCalls.delete(b);
-  }
+ const activeCallA = activeCalls.get(a);
+if (activeCallA && activeCallA.partner === b) {
+  activeCalls.delete(a);
+  activeCalls.delete(b);
+}
 
   const activeRandomCallA = activeRandomCalls.get(a);
   if (activeRandomCallA === b) {
