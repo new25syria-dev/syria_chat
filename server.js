@@ -940,7 +940,7 @@ function buildCallUserPayload(profile, fallbackId, fallbackName = "") {
   };
 }
 
-function buildPrivateCallPayloadForReceiver(callerProfile, callerId) {
+function buildPrivateCallPayloadForReceiver(callerProfile, callerId, callType = "audio") {
   const caller = buildCallUserPayload(callerProfile, callerId, "");
   return {
     from: caller.userName,
@@ -952,10 +952,11 @@ function buildPrivateCallPayloadForReceiver(callerProfile, callerId) {
     profileImage: caller.profileImage,
     friendProfileImage: caller.profileImage,
     partnerProfileImage: caller.profileImage,
+    callType
   };
 }
 
-function buildPrivateCallAcceptedPayload(otherProfile, otherId) {
+function buildPrivateCallAcceptedPayload(otherProfile, otherId, callType = "audio") {
   const other = buildCallUserPayload(otherProfile, otherId, "");
   return {
     by: other.userId,
@@ -969,10 +970,11 @@ function buildPrivateCallAcceptedPayload(otherProfile, otherId) {
     profileImage: other.profileImage,
     friendProfileImage: other.profileImage,
     partnerProfileImage: other.profileImage,
+    callType
   };
 }
 
-function buildPrivateCallConnectedPayload(otherProfile, otherId) {
+function buildPrivateCallConnectedPayload(otherProfile, otherId, callType = "audio") {
   const other = buildCallUserPayload(otherProfile, otherId, "");
   return {
     with: other.userId,
@@ -984,6 +986,7 @@ function buildPrivateCallConnectedPayload(otherProfile, otherId) {
     profileImage: other.profileImage,
     friendProfileImage: other.profileImage,
     partnerProfileImage: other.profileImage,
+    callType
   };
 }
 
@@ -3648,7 +3651,7 @@ socket.on("start_private_call", async (data) => {
       });
     }
 
-    createPendingCall(me, to);
+   createPendingCall(me, to, callType);
     lockUserSearch(me);
     lockUserSearch(to);
 
