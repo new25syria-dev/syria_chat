@@ -1935,29 +1935,29 @@ async function clearRelationshipRuntimeState(userA, userB) {
 
   await deletePendingFriendRequestsBetween(a, b);
 
+const activeA = activeMatches.get(a);
+if (activeA === b) {
+  activeMatches.delete(a);
+  activeMatches.delete(b);
+}
+
+const activeB = activeMatches.get(b);
+if (activeB === a) {
+  activeMatches.delete(a);
+  activeMatches.delete(b);
+}
+
 const activeCallA = activeCalls.get(a);
 if (activeCallA && activeCallA.partner === b) {
   activeCalls.delete(a);
   activeCalls.delete(b);
 }
 
-  const activeB = activeMatches.get(b);
-  if (activeB === a) {
-    activeMatches.delete(a);
-    activeMatches.delete(b);
-  }
-
- const activeCallA = activeCalls.get(a);
-if (activeCallA && activeCallA.partner === b) {
-  activeCalls.delete(a);
-  activeCalls.delete(b);
+const activeRandomCallA = activeRandomCalls.get(a);
+if (activeRandomCallA === b) {
+  activeRandomCalls.delete(a);
+  activeRandomCalls.delete(b);
 }
-
-  const activeRandomCallA = activeRandomCalls.get(a);
-  if (activeRandomCallA === b) {
-    activeRandomCalls.delete(a);
-    activeRandomCalls.delete(b);
-  }
 
   const pendingKeyA = pendingMatchByUser.get(a);
   if (pendingKeyA) {
