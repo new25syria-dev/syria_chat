@@ -4539,6 +4539,23 @@ socket.on("respond_nearby_chat_request", async (data) => {
     });
   }
 });
+  socket.on("leave_nearby_chat", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const partner = extractTargetName(data) || activeMatches.get(me);
+
+    if (!me || !partner) return;
+
+    activeMatches.delete(me);
+    activeMatches.delete(partner);
+
+    await emitToUser(partner, "nearby_chat_partner_left", {
+      reason: "partner_left"
+    });
+  } catch (err) {
+    logInfo("Nearby", "leave_nearby_chat failed", err);
+  }
+});
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
