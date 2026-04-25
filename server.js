@@ -2335,7 +2335,8 @@ async function getNearbyUsersForUser(userName, maxDistanceMeters = 5000) {
   ) {
     return [];
   }
-
+const friendIds = await getFriendIdsForUser(me);
+const blockedIds = new Set(friendIds.map(normalizeName));
   const users = await User.find({
     $and: [
       { userName: { $ne: me } },
@@ -2368,7 +2369,10 @@ async function getNearbyUsersForUser(userName, maxDistanceMeters = 5000) {
         lastSeen: user.lastSeen || null
       };
     })
-    .filter((user) => user.distanceMeters <= maxDistanceMeters)
+   .filter((user) => {
+  const id = normalizeName(user.userId || user.userName);
+  return user.distanceMeters <= maxDistanceMeters && !blockedIds.has(id);
+})
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
