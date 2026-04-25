@@ -130,7 +130,9 @@ const userSchema = new mongoose.Schema(
     bio: { type: String, default: "" },
     gender: { type: String, default: "unspecified" },
     fcmToken: { type: String, default: "" },
-
+    latitude: { type: Number, default: null, index: true },
+    longitude: { type: Number, default: null, index: true },
+    locationUpdatedAt: { type: Date, default: null },
     isBanned: { type: Boolean, default: false },
     banExpiresAt: { type: Date, default: null },
     banReason: { type: String, default: "" },
@@ -2294,6 +2296,81 @@ async function processUserReport(reporterId, reportedUserId) {
     ban: banInfo
   };
 }
+function sanitizeCoordinate(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (n < min || n > max) return null;
+  return n;
+}
+
+function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (v) => (v * Math.PI) / 180;
+
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+async function getNearbyUsersForUser(userName, maxDistanceMeters = 5000) {
+  const me = normalizeName(userName);
+  if (!me) return [];
+
+  const currentUser = await User.findOne({
+    $or: [{ userName: me }, { userId: me }]
+  }).lean();
+
+  if (
+    !currentUser ||
+    currentUser.latitude === null ||
+    currentUser.longitude === null
+  ) {
+    return [];
+  }
+
+  const users = await User.find({
+    $and: [
+      { userName: { $ne: me } },
+      { userId: { $ne: me } },
+      { online: true },
+      { latitude: { $ne: null } },
+      { longitude: { $ne: null } },
+      { isBanned: { $ne: true } }
+    ]
+  })
+    .select("userId userName displayName profileImage latitude longitude online lastSeen")
+    .lean();
+
+  return users
+    .map((user) => {
+      const distanceMeters = haversineDistanceMeters(
+        currentUser.latitude,
+        currentUser.longitude,
+        user.latitude,
+        user.longitude
+      );
+
+      return {
+        userId: publicUserId(user),
+        userName: publicDisplayName(user),
+        displayName: publicDisplayName(user),
+        profileImage: sanitizeProfileImage(user.profileImage),
+        distanceMeters,
+        online: user.online === true,
+        lastSeen: user.lastSeen || null
+      };
+    })
+    .filter((user) => user.distanceMeters <= maxDistanceMeters)
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
 
 // ==========================================
 // 5. منطق المطابقة
@@ -4281,7 +4358,69 @@ socket.on("webrtc_ice_candidate", async (data) => {
       socket.emit("error_msg", { message: "Failed to relay random ICE candidate" });
     }
   });
+  socket.on("update_location", async (data) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
 
+      const latitude = sanitizeCoordinate(data?.latitude, -90, 90);
+      const longitude = sanitizeCoordinate(data?.longitude, -180, 180);
+
+      if (latitude === null || longitude === null) {
+        return socket.emit("nearby_error", {
+          message: "Invalid location"
+        });
+      }
+
+      await User.findOneAndUpdate(
+        { $or: [{ userName: me }, { userId: me }] },
+        {
+          $set: {
+            latitude,
+            longitude,
+            locationUpdatedAt: new Date(),
+            lastSeen: new Date()
+          }
+        }
+      );
+
+      const nearbyUsers = await getNearbyUsersForUser(me, 5000);
+
+      socket.emit("nearby_users", {
+        users: nearbyUsers,
+        updatedAt: new Date()
+      });
+    } catch (err) {
+      logInfo("Nearby", "update_location failed", err);
+      socket.emit("nearby_error", {
+        message: "Failed to update location"
+      });
+    }
+  });
+
+  socket.on("get_nearby_users", async (data) => {
+    try {
+      const me = socket.data.userName;
+      if (!me) return;
+
+      const maxDistanceMeters =
+        Number.isFinite(Number(data?.maxDistanceMeters))
+          ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 50000)
+          : 5000;
+
+      const nearbyUsers = await getNearbyUsersForUser(me, maxDistanceMeters);
+
+      socket.emit("nearby_users", {
+        users: nearbyUsers,
+        updatedAt: new Date()
+      });
+    } catch (err) {
+      logInfo("Nearby", "get_nearby_users failed", err);
+      socket.emit("nearby_error", {
+        message: "Failed to load nearby users"
+      });
+    }
+  });
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
