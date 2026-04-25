@@ -4421,97 +4421,120 @@ socket.on("webrtc_ice_candidate", async (data) => {
       });
     }
   });
-    socket.on("send_nearby_chat_request", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const to = extractTargetName(data);
+   socket.on("send_nearby_chat_request", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const to = extractTargetName(data);
 
-      if (!me || !to || me === to) return;
+    if (!me || !to || me === to) return;
 
-      const myProfile = await getFullUserProfile(me);
-      const targetSocket = await getUserSocket(to);
-
-      if (!targetSocket) {
-        return socket.emit("nearby_chat_request_result", {
-          success: false,
-          message: "المستخدم غير متصل"
-        });
-      }
-
-      targetSocket.emit("nearby_chat_request", {
-        fromId: me,
-        from: myProfile?.userName || me,
-        userId: me,
-        userName: myProfile?.userName || me,
-        displayName: myProfile?.userName || me,
-        profileImage: myProfile?.profileImage || "",
-        message: "يريد مراسلتك"
-      });
-
-      socket.emit("nearby_chat_request_result", {
-        success: true,
-        to,
-        message: "تم إرسال طلب المراسلة"
-      });
-    } catch (err) {
-      logInfo("Nearby", "send_nearby_chat_request failed", err);
-      socket.emit("nearby_chat_request_result", {
+    const targetSocket = await getUserSocket(to);
+    if (!targetSocket) {
+      return socket.emit("nearby_chat_request_result", {
         success: false,
-        message: "فشل إرسال طلب المراسلة"
+        message: "المستخدم غير متصل الآن"
       });
     }
-  });
 
-  socket.on("respond_nearby_chat_request", async (data) => {
-    try {
-      const me = socket.data.userName;
-      const from = extractTargetName(
-        data?.fromId || data?.from || data?.userId || data
-      );
-      const accept = Boolean(data?.accept);
+    const myProfile = await getFullUserProfile(me);
 
-      if (!me || !from || me === from) return;
+    targetSocket.emit("nearby_chat_request", {
+      from: myProfile?.userName || me,
+      fromId: me,
+      userId: me,
+      friendId: me,
+      partnerId: me,
+      userName: myProfile?.userName || me,
+      displayName: myProfile?.userName || me,
+      profileImage: myProfile?.profileImage || "",
+      distanceMeters: 1
+    });
 
-      const myProfile = await getFullUserProfile(me);
-      const fromProfile = await getFullUserProfile(from);
+    socket.emit("nearby_chat_request_result", {
+      success: true,
+      to,
+      message: "تم إرسال طلب المراسلة"
+    });
+  } catch (err) {
+    logInfo("Nearby", "send_nearby_chat_request failed", err);
+    socket.emit("nearby_chat_request_result", {
+      success: false,
+      message: "فشل إرسال طلب المراسلة"
+    });
+  }
+});
 
-      if (!accept) {
-        await emitToUser(from, "nearby_chat_rejected", {
-          byId: me,
-          by: myProfile?.userName || me,
-          profileImage: myProfile?.profileImage || ""
-        });
+socket.on("respond_nearby_chat_request", async (data) => {
+  try {
+    const me = socket.data.userName;
+    const from = extractTargetName(data);
+    const accept = data?.accept === true;
 
-        return socket.emit("nearby_chat_request_closed", {
-          success: true,
-          accepted: false
-        });
-      }
+    if (!me || !from || me === from) return;
 
-      await emitToUser(from, "nearby_chat_accepted", {
-        partnerId: me,
-        partnerName: myProfile?.userName || me,
+    const myProfile = await getFullUserProfile(me);
+    const fromProfile = await getFullUserProfile(from);
+
+    if (!accept) {
+      await emitToUser(from, "nearby_chat_rejected", {
+        by: me,
+        byId: me,
         userId: me,
         userName: myProfile?.userName || me,
-        displayName: myProfile?.userName || me,
         profileImage: myProfile?.profileImage || ""
       });
 
-      socket.emit("nearby_chat_accepted", {
-        partnerId: from,
-        partnerName: fromProfile?.userName || from,
-        userId: from,
-        userName: fromProfile?.userName || from,
-        displayName: fromProfile?.userName || from,
-        profileImage: fromProfile?.profileImage || ""
+      socket.emit("nearby_chat_request_closed", {
+        success: true,
+        reason: "rejected"
       });
-    } catch (err) {
-      logInfo("Nearby", "respond_nearby_chat_request failed", err);
-      socket.emit("nearby_error", {
-        message: "فشل الرد على طلب المراسلة"
-      });
+
+      return;
     }
-  });
+
+    activeMatches.set(me, from);
+    activeMatches.set(from, me);
+
+    await emitToUser(from, "nearby_chat_accepted", {
+      userId: me,
+      partnerId: me,
+      partnerName: myProfile?.userName || me,
+      userName: myProfile?.userName || me,
+      displayName: myProfile?.userName || me,
+      profileImage: myProfile?.profileImage || "",
+      chatType: "text"
+    });
+
+    socket.emit("nearby_chat_accepted", {
+      userId: from,
+      partnerId: from,
+      partnerName: fromProfile?.userName || from,
+      userName: fromProfile?.userName || from,
+      displayName: fromProfile?.userName || from,
+      profileImage: fromProfile?.profileImage || "",
+      chatType: "text"
+    });
+
+    await emitToUser(from, "match_confirmed", {
+      partnerName: myProfile?.userName || me,
+      partnerId: me,
+      profileImage: myProfile?.profileImage || "",
+      chatType: "text"
+    });
+
+    socket.emit("match_confirmed", {
+      partnerName: fromProfile?.userName || from,
+      partnerId: from,
+      profileImage: fromProfile?.profileImage || "",
+      chatType: "text"
+    });
+  } catch (err) {
+    logInfo("Nearby", "respond_nearby_chat_request failed", err);
+    socket.emit("nearby_error", {
+      message: "فشل الرد على طلب المراسلة"
+    });
+  }
+});
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
