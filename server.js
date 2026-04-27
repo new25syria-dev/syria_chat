@@ -3053,7 +3053,9 @@ io.on("connection", (socket) => {
           online: profileA?.online === true,
           chatType: proposal.chatType
         });
-
+if (proposal.chatType === "voice") {
+  await activateRandomCallPair(proposal.userA, proposal.userB);
+}
         logInfo("Matchmaking", `Match confirmed`, {
           userA: proposal.userA,
           userB: proposal.userB,
