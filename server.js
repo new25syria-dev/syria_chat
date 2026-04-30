@@ -3221,35 +3221,37 @@ if (proposal.chatType === "voice") {
     }
   });
 
-  socket.on("message", async (msgContent) => {
-    const me = socket.data.userName;
-    const partner = activeMatches.get(me);
+ socket.on("message", async (msgContent) => {
+  const me = socket.data.userName;
+  const partner = activeMatches.get(me);
+
+  const originalText = sanitizeText(msgContent, 2000);
   const cleanText = cleanBadWords(msgContent);
 
-if (!partner || !cleanText) return;
-  socket.emit("warning", {
-    message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
-  });
-}
-    if (!partner || !cleanText) return;
+  if (!partner || !cleanText) return;
 
-    try {
-      const msgData = {
-        from: me,
-        to: partner,
-        type: "text",
-        text: cleanText,
-        time: new Date(),
-        conversationKey: pairKey(me, partner)
-      };
+  if (cleanText !== originalText) {
+    socket.emit("warning", {
+      message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
+    });
+  }
 
-      await RandomChatMessage.create(msgData);
-      await emitToUser(partner, "message", msgData);
-    } catch (err) {
-      logInfo("Error", "Random chat message failed to send", err);
-    }
-  });
+  try {
+    const msgData = {
+      from: me,
+      to: partner,
+      type: "text",
+      text: cleanText,
+      time: new Date(),
+      conversationKey: pairKey(me, partner)
+    };
 
+    await RandomChatMessage.create(msgData);
+    await emitToUser(partner, "message", msgData);
+  } catch (err) {
+    logInfo("Error", "Random chat message failed to send", err);
+  }
+});
   socket.on("send_image", async (imgData) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
