@@ -3224,8 +3224,9 @@ if (proposal.chatType === "voice") {
   socket.on("message", async (msgContent) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
-    const cleanText = cleanBadWords(msgContent);
-if (cleanText !== sanitizeText(msgContent, 2000)) {
+  const cleanText = cleanBadWords(msgContent);
+
+if (!partner || !cleanText) return;
   socket.emit("warning", {
     message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
   });
