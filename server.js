@@ -3669,38 +3669,23 @@ socket.on("message", async (msgContent) => {
     }
   });
 
-  socket.on("private_message", async (data) => {
-    const me = socket.data.userName;
-    const to = extractTargetName(data);
+ socket.on("private_message", async (data) => {
+  const me = socket.data.userName;
+  const to = extractTargetName(data);
 
-   const cleanText = cleanBadWords(data?.text);
+  const cleanText = cleanBadWords(data?.text);
+  const image = sanitizeProfileImage(data?.image);
+  const audio = sanitizeAudioPayload(data?.audio);
+  const durationSeconds = sanitizeDurationSeconds(data?.durationSeconds);
 
-const cleanText = cleanBadWords(data?.text);
-    const activeBan = await getActiveBanState({
-  userName: me,
-  deviceId: socket.data.deviceId
-});
+  const hasText = !!cleanText;
+  const hasImage = !!image;
+  const hasAudio = !!audio;
 
-if (activeBan) {
-  socket.emit("ban_status", activeBan);
-  socket.emit("message_blocked", {
-    reason: activeBan.reason,
-    remainingMs: activeBan.remainingMs
-  });
-  return;
-}
-    const image = sanitizeProfileImage(data?.image);
-    const audio = sanitizeAudioPayload(data?.audio);
-    const durationSeconds = sanitizeDurationSeconds(data?.durationSeconds);
+  if (!me || !to) return;
+  if (!hasText && !hasImage && !hasAudio) return;
 
-    const hasText = !!cleanText;
-    const hasImage = !!image;
-    const hasAudio = !!audio;
-
-    if (!me || !to) return;
-    if (!hasText && !hasImage && !hasAudio) return;
-
-    try {
+  try {
       const isFriend = await Friendship.findOne({
         pairKey: pairKey(me, to)
       }).lean();
