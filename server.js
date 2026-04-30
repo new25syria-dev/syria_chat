@@ -39,6 +39,9 @@ function normalizeBadWordText(text) {
     // إزالة الرموز والمسافات
     .replace(/[^a-z0-9\u0600-\u06FF]+/g, "");
 }
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 function buildLooseBadWordRegex(word) {
   const letters = String(word || "")
     .trim()
@@ -52,22 +55,16 @@ function cleanBadWords(text) {
   if (!original) return "";
 
   let clean = original;
-  const normalized = normalizeBadWordText(original);
 
   for (const word of BAD_WORDS) {
-    const normalizedWord = normalizeBadWordText(word);
-    if (!normalizedWord) continue;
+    const looseRegex = buildLooseBadWordRegex(word);
 
-    if (normalized.includes(normalizedWord)) {
-      const looseRegex = buildLooseBadWordRegex(word);
-      clean = clean.replace(looseRegex, (match) => {
-        const starsCount = Math.max(4, match.length);
-        return "*".repeat(starsCount);
-      });
-    }
+    clean = clean.replace(looseRegex, (match) => {
+      return "*".repeat(Math.max(4, match.length));
+    });
   }
 
-  return clean || "****";
+  return clean;
 }
 const REPORT_BAN_24H_THRESHOLD = 3;
 const REPORT_BAN_7D_THRESHOLD = 5;
@@ -3234,14 +3231,16 @@ socket.on("message", async (msgContent) => {
       ? msgContent?.text || msgContent?.message || msgContent?.content || ""
       : msgContent;
 
-  const originalText = sanitizeText(rawText, 2000);
-  const cleanText = cleanBadWords(rawText);
+ const originalText = sanitizeText(rawText, 2000);
+const cleanText = cleanBadWords(rawText);
 
-  if (cleanText !== originalText) {
-    socket.emit("warning", {
-      message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
-    });
-  }
+if (!cleanText) return;
+
+if (cleanText !== originalText) {
+  socket.emit("warning", {
+    message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
+  });
+}
 
   try {
     const msgData = {
