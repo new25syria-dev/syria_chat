@@ -1832,10 +1832,11 @@ async function forceRefreshUserSocketState(userName) {
   const cleanName = normalizeName(userName);
   if (!cleanName) return;
 
-  const socket = await getUserSocket(cleanName);
-  if (socket) {
-    socket.emit("social_state_refresh", { success: true });
-  }
+const socket = await getUserSocket(cleanName);
+if (socket) {
+  socket.emit("banned", payload);
+  socket.emit("ban_status", payload);
+}
 }
 
 async function restartSearchForUser(userName) {
@@ -3285,7 +3286,19 @@ socket.on("message", async (msgContent) => {
     socket.emit("error_msg", { message: "لا يوجد شريك لإرسال الرسالة" });
     return;
   }
+const activeBan = await getActiveBanState({
+  userName: me,
+  deviceId: socket.data.deviceId
+});
 
+if (activeBan) {
+  socket.emit("ban_status", activeBan);
+  socket.emit("message_blocked", {
+    reason: activeBan.reason,
+    remainingMs: activeBan.remainingMs
+  });
+  return;
+}
   const rawText =
     typeof msgContent === "object"
       ? msgContent?.text || msgContent?.message || msgContent?.content || ""
@@ -3299,9 +3312,13 @@ if (!cleanText) return;
 if (cleanText !== originalText) {
   const warningResult = await processBadWordWarning(me, socket);
 
-  if (warningResult?.banned) {
-    return;
-  }
+if (warningResult?.banned) {
+  socket.emit("message_blocked", {
+    reason: warningResult.ban?.reason,
+    remainingMs: warningResult.ban?.remainingMs
+  });
+  return;
+}
 }
 
   try {
@@ -3753,6 +3770,19 @@ if (cleanText !== sanitizeText(data?.text, 2000)) {
   if (warningResult?.banned) {
     return;
   }
+}
+    const activeBan = await getActiveBanState({
+  userName: me,
+  deviceId: socket.data.deviceId
+});
+
+if (activeBan) {
+  socket.emit("ban_status", activeBan);
+  socket.emit("message_blocked", {
+    reason: activeBan.reason,
+    remainingMs: activeBan.remainingMs
+  });
+  return;
 }
     const image = sanitizeProfileImage(data?.image);
     const audio = sanitizeAudioPayload(data?.audio);
