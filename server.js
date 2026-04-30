@@ -11,12 +11,24 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 const BAD_WORDS = [
-  "كلمة1",
-  "كلمة2",
+  // شتائم عامة
+  "غبي",
+  "حمار",
+  "كلب",
+  "قذر",
+  "وسخ",
+
+  // ألفاظ سيئة شائعة (خفيفة)
+  "تافه",
+  "حقير",
+  "سخيف",
+
+  // إنجليزي
   "fuck",
   "shit",
+  "bitch",
+  "asshole"
 ];
-
 function normalizeBadWordText(text) {
   return String(text)
     .toLowerCase()
