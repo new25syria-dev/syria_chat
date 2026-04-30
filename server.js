@@ -32,18 +32,22 @@ const BAD_WORDS = [
 function normalizeBadWordText(text) {
   return String(text)
     .toLowerCase()
+    // إزالة التشكيل
+    .replace(/[\u064B-\u065F]/g, "")
+    // إزالة المدود
+    .replace(/ـ+/g, "")
+    // إزالة الرموز والمسافات
     .replace(/[^a-z0-9\u0600-\u06FF]+/g, "");
 }
-
 function buildLooseBadWordRegex(word) {
   const letters = String(word || "")
     .trim()
     .split("")
     .map((char) => escapeRegex(char));
 
-  return new RegExp(letters.join("[\\s\\W_]*"), "gi");
+  // يسمح بمسافات + رموز + مدود
+  return new RegExp(letters.join("[\\s\\W_ـ]*"), "gi");
 }
-
 function cleanBadWords(text) {
   let clean = sanitizeText(text, 2000);
   const normalized = normalizeBadWordText(clean);
@@ -56,7 +60,7 @@ function cleanBadWords(text) {
 
     if (normalized.includes(normalizedWord)) {
       const looseRegex = buildLooseBadWordRegex(safeWord);
-      clean = clean.replace(looseRegex, "****");
+     clean = clean.replace(looseRegex, (match) => "*".repeat(match.length));
     }
   }
 
