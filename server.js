@@ -10,7 +10,39 @@ const http = require("http");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
+const BAD_WORDS = [
+  "كلمة1",
+  "كلمة2",
+  "fuck",
+  "shit",
+];
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalize(text) {
+  return String(text)
+    .toLowerCase()
+    .replace(/[\s\W_]+/g, '');
+}
+
+function cleanBadWords(text) {
+  let clean = sanitizeText(text, 2000);
+  const normalized = normalize(clean);
+
+  for (const word of BAD_WORDS) {
+    const safeWord = String(word || "").toLowerCase().trim();
+    if (!safeWord) continue;
+
+    if (normalized.includes(safeWord)) {
+      const regex = new RegExp(escapeRegex(word), "gi");
+      clean = clean.replace(regex, "****");
+    }
+  }
+
+  return clean;
+}
 const REPORT_BAN_24H_THRESHOLD = 3;
 const REPORT_BAN_7D_THRESHOLD = 5;
 const TEMP_BAN_24H_MS = 24 * 60 * 60 * 1000;
@@ -3165,8 +3197,12 @@ if (proposal.chatType === "voice") {
   socket.on("message", async (msgContent) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
-    const cleanText = sanitizeText(msgContent, 2000);
-
+    const cleanText = cleanBadWords(msgContent);
+if (cleanText !== sanitizeText(msgContent, 2000)) {
+  socket.emit("warning", {
+    message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
+  });
+}
     if (!partner || !cleanText) return;
 
     try {
@@ -3631,7 +3667,12 @@ if (proposal.chatType === "voice") {
     const me = socket.data.userName;
     const to = extractTargetName(data);
 
-    const cleanText = sanitizeText(data?.text, 2000);
+    const cleanText = cleanBadWords(data?.text);
+    if (cleanText !== sanitizeText(data?.text, 2000)) {
+  socket.emit("warning", {
+    message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
+  });
+}
     const image = sanitizeProfileImage(data?.image);
     const audio = sanitizeAudioPayload(data?.audio);
     const durationSeconds = sanitizeDurationSeconds(data?.durationSeconds);
