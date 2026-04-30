@@ -3220,53 +3220,7 @@ if (proposal.chatType === "voice") {
     }
   });
 
-socket.on("message", async (msgContent) => {
-  const me = socket.data.userName;
-  const partner = activeMatches.get(me);
-
-  const originalText = sanitizeText(msgContent, 2000);
-  const cleanText = cleanBadWords(msgContent);
-
-  if (!partner) {
-  socket.emit("error_msg", { message: "لا يوجد شريك لإرسال الرسالة" });
-  return;
-}
-
-if (!cleanText) {
-  socket.emit("message", {
-    from: me,
-    to: partner,
-    type: "text",
-    text: "****",
-    time: new Date(),
-    conversationKey: pairKey(me, partner)
-  });
-  return;
-}
-
-  if (cleanText !== originalText) {
-    socket.emit("warning", {
-      message: "تم تعديل الرسالة لأنها تحتوي على ألفاظ غير مناسبة"
-    });
-  }
-
-  try {
-    const msgData = {
-      from: me,
-      to: partner,
-      type: "text",
-      text: cleanText,
-      time: new Date(),
-      conversationKey: pairKey(me, partner)
-    };
-
-    await RandomChatMessage.create(msgData);
-
-   await emitToUser(partner, "message", msg
-  } catch (err) {
-    logInfo("Error", "Random chat message failed to send", err);
-  }
-});
+socket.on("message", async (msgC
   socket.on("send_image", async (imgData) => {
     const me = socket.data.userName;
     const partner = activeMatches.get(me);
