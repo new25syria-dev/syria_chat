@@ -45,8 +45,7 @@ function buildLooseBadWordRegex(word) {
     .split("")
     .map((char) => escapeRegex(char));
 
-  // يسمح بمسافات + رموز + مدود
-  return new RegExp(letters.join("[\\s\\W_ـ]*"), "gi");
+  return new RegExp(letters.join("[\\s\\d\\p{P}\\p{S}_ـ]*"), "giu");
 }
 function cleanBadWords(text) {
   const original = sanitizeText(text, 2000);
