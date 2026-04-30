@@ -3222,28 +3222,15 @@ socket.on("message", async (msgContent) => {
     socket.emit("error_msg", { message: "لا يوجد شريك لإرسال الرسالة" });
     return;
   }
-const activeBan = await getActiveBanState({
-  userName: me,
-  deviceId: socket.data.deviceId
-});
 
-if (activeBan) {
-  socket.emit("ban_status", activeBan);
-  socket.emit("message_blocked", {
-    reason: activeBan.reason,
-    remainingMs: activeBan.remainingMs
-  });
-  return;
-}
- const rawText =
-  typeof msgContent === "object"
-    ? msgContent?.text || msgContent?.message || msgContent?.content || ""
-    : msgContent;
+  const rawText =
+    typeof msgContent === "object"
+      ? msgContent?.text || msgContent?.message || msgContent?.content || ""
+      : msgContent;
 
-const cleanText = cleanBadWords(rawText);
+  const cleanText = cleanBadWords(rawText);
 
-if (!cleanText) return;
-}
+  if (!cleanText) return;
 
   try {
     const msgData = {
