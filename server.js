@@ -899,13 +899,7 @@ async function emitBanAndDisconnect(socket, banPayload) {
   socket.emit("banned", banPayload);
   socket.emit("ban_status", banPayload);
 
-  setTimeout(() => {
-    try {
-      socket.disconnect(true);
-    } catch (err) {
-      logInfo("BAN", "Failed disconnecting banned socket", err);
-    }
-  }, 150);
+  // لا تفصل المستخدم
 }
 
 async function getUserSocket(userName) {
