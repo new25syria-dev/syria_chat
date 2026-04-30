@@ -2258,7 +2258,7 @@ async function banUserNow(userName, reason, durationMs, level = 1) {
         banExpiresAt: expiresAt
       }
     },
-    { returnDocument: "after" }
+    { new: true }
   ).lean();
 
   if (user) {
@@ -2314,12 +2314,27 @@ async function processBadWordWarning(userName, socket) {
     { $or: [{ userName: cleanName }, { userId: cleanName }] },
     {
       $inc: { badWordWarnings: 1 },
-      $set: { lastBadWordWarningAt: new Date() }
+      $set: { lastBadWordWarningAt: new Date() },
+      $setOnInsert: {
+        userName: cleanName,
+        userId: cleanName,
+        displayName: cleanName,
+        badWordWarnings: 0,
+        reports: 0,
+        isBanned: false,
+        banReason: "",
+        banLevel: 0
+      }
     },
-    { returnDocument: "after" }
+    {
+      upsert: true,
+      new: true   // 👈 مهم
+    }
   ).lean();
 
   const warnings = Number(user?.badWordWarnings || 0);
+
+  console.log("WARNING:", cleanName, warnings); // 👈 للتأكد
 
   if (warnings >= BAD_WORD_WARNING_LIMIT) {
     const banPayload = await banUserNow(
@@ -2339,8 +2354,7 @@ async function processBadWordWarning(userName, socket) {
   if (socket) {
     socket.emit("bad_word_warning", {
       warnings,
-      limit: BAD_WORD_WARNING_LIMIT,
-      message: `تحذير ${warnings}/${BAD_WORD_WARNING_LIMIT}: تم تعديل رسالتك لأنها تحتوي على ألفاظ غير مناسبة`
+      limit: BAD_WORD_WARNING_LIMIT
     });
   }
 
