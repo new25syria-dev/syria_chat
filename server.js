@@ -17,27 +17,34 @@ const BAD_WORDS = [
   "shit",
 ];
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function normalize(text) {
+function normalizeBadWordText(text) {
   return String(text)
     .toLowerCase()
-    .replace(/[\s\W_]+/g, '');
+    .replace(/[^a-z0-9\u0600-\u06FF]+/g, "");
+}
+
+function buildLooseBadWordRegex(word) {
+  const letters = String(word || "")
+    .trim()
+    .split("")
+    .map((char) => escapeRegex(char));
+
+  return new RegExp(letters.join("[\\s\\W_]*"), "gi");
 }
 
 function cleanBadWords(text) {
   let clean = sanitizeText(text, 2000);
-  const normalized = normalize(clean);
+  const normalized = normalizeBadWordText(clean);
 
   for (const word of BAD_WORDS) {
     const safeWord = String(word || "").toLowerCase().trim();
     if (!safeWord) continue;
 
-    if (normalized.includes(safeWord)) {
-      const regex = new RegExp(escapeRegex(word), "gi");
-      clean = clean.replace(regex, "****");
+    const normalizedWord = normalizeBadWordText(safeWord);
+
+    if (normalized.includes(normalizedWord)) {
+      const looseRegex = buildLooseBadWordRegex(safeWord);
+      clean = clean.replace(looseRegex, "****");
     }
   }
 
