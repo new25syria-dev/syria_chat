@@ -3220,7 +3220,7 @@ if (proposal.chatType === "voice") {
     }
   });
 
- socket.on("message", async (msgContent) => {
+socket.on("message", async (msgContent) => {
   const me = socket.data.userName;
   const partner = activeMatches.get(me);
 
@@ -3246,7 +3246,9 @@ if (proposal.chatType === "voice") {
     };
 
     await RandomChatMessage.create(msgData);
+
     await emitToUser(partner, "message", msgData);
+    socket.emit("message", msgData);
   } catch (err) {
     logInfo("Error", "Random chat message failed to send", err);
   }
