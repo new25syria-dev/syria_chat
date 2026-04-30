@@ -3235,21 +3235,14 @@ if (activeBan) {
   });
   return;
 }
-  const rawText =
-    typeof msgContent === "object"
-      ? msgContent?.text || msgContent?.message || msgContent?.content || ""
-      : msgContent;
+ const rawText =
+  typeof msgContent === "object"
+    ? msgContent?.text || msgContent?.message || msgContent?.content || ""
+    : msgContent;
 
- const originalText = sanitizeText(rawText, 2000);
 const cleanText = cleanBadWords(rawText);
 
 if (!cleanText) return;
-
-const originalText = sanitizeText(rawText, 2000);
-const cleanText = cleanBadWords(rawText);
-
-if (!cleanText) return;
-}
 }
 
   try {
