@@ -3227,7 +3227,22 @@ socket.on("message", async (msgContent) => {
   const originalText = sanitizeText(msgContent, 2000);
   const cleanText = cleanBadWords(msgContent);
 
-  if (!partner || !cleanText) return;
+  if (!partner) {
+  socket.emit("error_msg", { message: "لا يوجد شريك لإرسال الرسالة" });
+  return;
+}
+
+if (!cleanText) {
+  socket.emit("message", {
+    from: me,
+    to: partner,
+    type: "text",
+    text: "****",
+    time: new Date(),
+    conversationKey: pairKey(me, partner)
+  });
+  return;
+}
 
   if (cleanText !== originalText) {
     socket.emit("warning", {
