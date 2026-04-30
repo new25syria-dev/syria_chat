@@ -66,8 +66,6 @@ function cleanBadWords(text) {
 
   return clean;
 }
-const BAD_WORD_WARNING_LIMIT = 3;
-const BAD_WORD_TEMP_BAN_MS = 60 * 60 * 1000; // ساعة
 const REPORT_BAN_24H_THRESHOLD = 3;
 const REPORT_BAN_7D_THRESHOLD = 5;
 const TEMP_BAN_24H_MS = 24 * 60 * 60 * 1000;
@@ -2301,63 +2299,7 @@ async function banUserNow(userName, reason, durationMs, level = 1) {
 
   return payload;
 }
-async function processBadWordWarning(userName, socket) {
-  const cleanName = normalizeName(userName);
-  if (!cleanName) return null;
 
-  const user = await User.findOneAndUpdate(
-    { $or: [{ userName: cleanName }, { userId: cleanName }] },
-    {
-      $inc: { badWordWarnings: 1 },
-      $set: { lastBadWordWarningAt: new Date() },
-      $setOnInsert: {
-        userName: cleanName,
-        userId: cleanName,
-        displayName: cleanName,
-        badWordWarnings: 0,
-        reports: 0,
-        isBanned: false,
-        banReason: "",
-        banLevel: 0
-      }
-    },
-    {
-      upsert: true,
-      new: true   // 👈 مهم
-    }
-  ).lean();
-
-  const warnings = Number(user?.badWordWarnings || 0);
-
-  console.log("WARNING:", cleanName, warnings); // 👈 للتأكد
-
-  if (warnings >= BAD_WORD_WARNING_LIMIT) {
-    const banPayload = await banUserNow(
-      cleanName,
-      "تم حظرك مؤقتًا بسبب تكرار استخدام كلمات غير مناسبة",
-      BAD_WORD_TEMP_BAN_MS,
-      1
-    );
-
-    return {
-      banned: true,
-      warnings,
-      ban: banPayload
-    };
-  }
-
-  if (socket) {
-    socket.emit("bad_word_warning", {
-      warnings,
-      limit: BAD_WORD_WARNING_LIMIT
-    });
-  }
-
-  return {
-    banned: false,
-    warnings
-  };
-}
 async function processUserReport(reporterId, reportedUserId) {
   const reporter = normalizeName(reporterId);
   const reported = normalizeName(reportedUserId);
@@ -3303,15 +3245,10 @@ const cleanText = cleanBadWords(rawText);
 
 if (!cleanText) return;
 
-if (cleanText !== originalText) {
-  const warningResult = await processBadWordWarning(me, socket);
+const originalText = sanitizeText(rawText, 2000);
+const cleanText = cleanBadWords(rawText);
 
-if (warningResult?.banned) {
-  socket.emit("message_blocked", {
-    reason: warningResult.ban?.reason,
-    remainingMs: warningResult.ban?.remainingMs
-  });
-  return;
+if (!cleanText) return;
 }
 }
 
@@ -3758,13 +3695,7 @@ if (warningResult?.banned) {
 
    const cleanText = cleanBadWords(data?.text);
 
-if (cleanText !== sanitizeText(data?.text, 2000)) {
-  const warningResult = await processBadWordWarning(me, socket);
-
-  if (warningResult?.banned) {
-    return;
-  }
-}
+const cleanText = cleanBadWords(data?.text);
     const activeBan = await getActiveBanState({
   userName: me,
   deviceId: socket.data.deviceId
