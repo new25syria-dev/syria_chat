@@ -49,22 +49,26 @@ function buildLooseBadWordRegex(word) {
   return new RegExp(letters.join("[\\s\\W_ـ]*"), "gi");
 }
 function cleanBadWords(text) {
-  let clean = sanitizeText(text, 2000);
-  const normalized = normalizeBadWordText(clean);
+  const original = sanitizeText(text, 2000);
+  if (!original) return "";
+
+  let clean = original;
+  const normalized = normalizeBadWordText(original);
 
   for (const word of BAD_WORDS) {
-    const safeWord = String(word || "").toLowerCase().trim();
-    if (!safeWord) continue;
-
-    const normalizedWord = normalizeBadWordText(safeWord);
+    const normalizedWord = normalizeBadWordText(word);
+    if (!normalizedWord) continue;
 
     if (normalized.includes(normalizedWord)) {
-      const looseRegex = buildLooseBadWordRegex(safeWord);
-     clean = clean.replace(looseRegex, (match) => "*".repeat(match.length));
+      const looseRegex = buildLooseBadWordRegex(word);
+      clean = clean.replace(looseRegex, (match) => {
+        const starsCount = Math.max(4, match.length);
+        return "*".repeat(starsCount);
+      });
     }
   }
 
-  return clean;
+  return clean || "****";
 }
 const REPORT_BAN_24H_THRESHOLD = 3;
 const REPORT_BAN_7D_THRESHOLD = 5;
