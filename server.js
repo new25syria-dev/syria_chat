@@ -3262,8 +3262,7 @@ if (!cleanText) {
 
     await RandomChatMessage.create(msgData);
 
-    await emitToUser(partner, "message", msgData);
-    socket.emit("message", msgData);
+   await emitToUser(partner, "message", msg
   } catch (err) {
     logInfo("Error", "Random chat message failed to send", err);
   }
