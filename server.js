@@ -2372,7 +2372,7 @@ function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-async function getNearbyUsersForUser(userName, maxDistanceMeters = 5000) {
+async function getNearbyUsersForUser(userName, maxDistanceMeters = 3000000, limit = 10) {
   const me = normalizeName(userName);
   if (!me) return [];
 
@@ -2425,7 +2425,8 @@ const blockedIds = new Set(friendIds.map(normalizeName));
   const id = normalizeName(user.userId || user.userName);
   return user.distanceMeters <= maxDistanceMeters && !blockedIds.has(id);
 })
-    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+   .sort((a, b) => a.distanceMeters - b.distanceMeters)
+.slice(0, limit);
 }
 
 // ==========================================
@@ -4438,7 +4439,7 @@ socket.on("webrtc_ice_candidate", async (data) => {
         }
       );
 
-      const nearbyUsers = await getNearbyUsersForUser(me, 5000);
+     const nearbyUsers = await getNearbyUsersForUser(me, 3000000, 10);
 
       socket.emit("nearby_users", {
         users: nearbyUsers,
@@ -4457,12 +4458,17 @@ socket.on("webrtc_ice_candidate", async (data) => {
       const me = socket.data.userName;
       if (!me) return;
 
-      const maxDistanceMeters =
-        Number.isFinite(Number(data?.maxDistanceMeters))
-          ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 50000)
-          : 5000;
+     const maxDistanceMeters =
+  Number.isFinite(Number(data?.maxDistanceMeters))
+    ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 300000)
+    : 300000;
 
-      const nearbyUsers = await getNearbyUsersForUser(me, maxDistanceMeters);
+const limit =
+  Number.isFinite(Number(data?.limit))
+    ? Math.min(Math.max(Number(data.limit), 1), 10)
+    : 10;
+
+const nearbyUsers = await getNearbyUsersForUser(me, maxDistanceMeters, limit);
 
       socket.emit("nearby_users", {
         users: nearbyUsers,
