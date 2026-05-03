@@ -2411,15 +2411,15 @@ const blockedIds = new Set(friendIds.map(normalizeName));
         user.longitude
       );
 
-    return {
-  userId: publicUserId(user),
-  userName: publicDisplayName(user),
-  displayName: publicDisplayName(user),
-  profileImage: sanitizeProfileImage(user.profileImage),
-  distanceMeters,
-  online: user.online === true,
-  lastSeen: user.lastSeen || null
-};
+      return {
+        userId: publicUserId(user),
+        userName: publicDisplayName(user),
+        displayName: publicDisplayName(user),
+        profileImage: sanitizeProfileImage(user.profileImage),
+        distanceMeters,
+        online: user.online === true,
+        lastSeen: user.lastSeen || null
+      };
     })
    .filter((user) => {
   const id = normalizeName(user.userId || user.userName);
