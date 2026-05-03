@@ -2411,15 +2411,17 @@ const blockedIds = new Set(friendIds.map(normalizeName));
         user.longitude
       );
 
-      return {
-        userId: publicUserId(user),
-        userName: publicDisplayName(user),
-        displayName: publicDisplayName(user),
-        profileImage: sanitizeProfileImage(user.profileImage),
-        distanceMeters,
-        online: user.online === true,
-        lastSeen: user.lastSeen || null
-      };
+     const distanceKm = distanceMeters / 1000;
+
+return {
+  userId: publicUserId(user),
+  userName: publicDisplayName(user),
+  displayName: publicDisplayName(user),
+  profileImage: sanitizeProfileImage(user.profileImage),
+  distanceKm: Number(distanceKm.toFixed(2)), // مثال: 1.25 كم
+  online: user.online === true,
+  lastSeen: user.lastSeen || null
+};
     })
    .filter((user) => {
   const id = normalizeName(user.userId || user.userName);
