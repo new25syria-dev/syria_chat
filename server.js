@@ -3230,7 +3230,6 @@ socket.on("message", async (msgContent) => {
       : msgContent;
 
   const cleanText = cleanBadWords(rawText);
-
   if (!cleanText) return;
 
   try {
@@ -3246,9 +3245,14 @@ socket.on("message", async (msgContent) => {
     await RandomChatMessage.create(msgData);
 
     await emitToUser(partner, "message", msgData);
-    socket.emit("message", msgData);
+
+    socket.emit("message_sent", {
+      success: true,
+      message: msgData
+    });
   } catch (err) {
     logInfo("Error", "Random chat message failed to send", err);
+    socket.emit("error_msg", { message: "فشل إرسال الرسالة" });
   }
 });
 
