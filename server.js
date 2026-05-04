@@ -2371,7 +2371,17 @@ function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
 
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
+function metersToKmText(meters) {
+  const km = Number(meters) / 1000;
 
+  if (!Number.isFinite(km)) return "0 كم";
+
+  if (km < 1) {
+    return `${km.toFixed(2)} كم`;
+  }
+
+  return `${km.toFixed(1)} كم`;
+}
 async function getNearbyUsersForUser(userName, maxDistanceMeters = 3000000, limit = 10) {
   const me = normalizeName(userName);
   if (!me) return [];
@@ -2411,15 +2421,19 @@ const blockedIds = new Set(friendIds.map(normalizeName));
         user.longitude
       );
 
-      return {
-        userId: publicUserId(user),
-        userName: publicDisplayName(user),
-        displayName: publicDisplayName(user),
-        profileImage: sanitizeProfileImage(user.profileImage),
-        distanceMeters,
-        online: user.online === true,
-        lastSeen: user.lastSeen || null
-      };
+     return {
+  userId: publicUserId(user),
+  userName: publicDisplayName(user),
+  displayName: publicDisplayName(user),
+  profileImage: sanitizeProfileImage(user.profileImage),
+
+  distanceMeters,
+  distanceKm: Number((distanceMeters / 1000).toFixed(2)),
+  distanceText: metersToKmText(distanceMeters),
+
+  online: user.online === true,
+  lastSeen: user.lastSeen || null
+};
     })
    .filter((user) => {
   const id = normalizeName(user.userId || user.userName);
