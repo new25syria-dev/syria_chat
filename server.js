@@ -4430,21 +4430,41 @@ socket.on("webrtc_ice_candidate", async (data) => {
       await User.findOneAndUpdate(
         { $or: [{ userName: me }, { userId: me }] },
         {
-          $set: {
-            latitude,
-            longitude,
-            locationUpdatedAt: new Date(),
-            lastSeen: new Date()
-          }
+         $set: {
+  latitude,
+  longitude,
+  locationUpdatedAt: new Date(),
+  lastSeen: new Date(),
+  online: true,
+  socketId: socket.id
+}
         }
       );
 
-     const nearbyUsers = await getNearbyUsersForUser(me, 3000000, 10);
+    const nearbyUsers = await getNearbyUsersForUser(me, 3000000, 10);
 
-      socket.emit("nearby_users", {
-        users: nearbyUsers,
-        updatedAt: new Date()
-      });
+socket.emit("nearby_users", {
+  users: nearbyUsers,
+  updatedAt: new Date()
+});
+
+// تحديث القائمة عند المستخدمين القريبين أيضًا
+for (const nearbyUser of nearbyUsers) {
+  const nearbyUserId = normalizeName(nearbyUser.userId);
+
+  if (!nearbyUserId) continue;
+
+  const refreshedListForOtherUser = await getNearbyUsersForUser(
+    nearbyUserId,
+    3000000,
+    10
+  );
+
+  await emitToUser(nearbyUserId, "nearby_users", {
+    users: refreshedListForOtherUser,
+    updatedAt: new Date()
+  });
+}
     } catch (err) {
       logInfo("Nearby", "update_location failed", err);
       socket.emit("nearby_error", {
@@ -4461,7 +4481,7 @@ socket.on("webrtc_ice_candidate", async (data) => {
      const maxDistanceMeters =
   Number.isFinite(Number(data?.maxDistanceMeters))
     ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 3000000)
-    : 300000;
+    : 3000000;
 
 const limit =
   Number.isFinite(Number(data?.limit))
