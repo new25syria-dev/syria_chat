@@ -634,7 +634,24 @@ function publicDisplayName(userDoc) {
 function publicUserId(userDoc) {
   return normalizeName(userDoc?.userId || userDoc?.userName);
 }
+function getVerifiedRandomChatPartner(me) {
+  const cleanMe = normalizeName(me);
+  if (!cleanMe) return "";
 
+  const partner = activeMatches.get(cleanMe);
+  if (!partner) return "";
+
+  if (activeMatches.get(partner) !== cleanMe) {
+    logInfo("SECURITY", "Invalid active match relation", {
+      me: cleanMe,
+      partner,
+      partnerPointsTo: activeMatches.get(partner) || null
+    });
+    return "";
+  }
+
+  return partner;
+}
 function pairKey(a, b) {
   const x = normalizeName(a);
   const y = normalizeName(b);
@@ -3055,17 +3072,33 @@ io.on("connection", (socket) => {
       proposal.acceptedBy.add(me);
       const partner = proposal.userA === me ? proposal.userB : proposal.userA;
 
-      if (proposal.acceptedBy.size === 2) {
-        if (proposal.timeoutId) {
-          clearTimeout(proposal.timeoutId);
-        }
+     if (proposal.timeoutId) {
+  clearTimeout(proposal.timeoutId);
+}
 
-        pendingMatches.delete(key);
-        pendingMatchByUser.delete(proposal.userA);
-        pendingMatchByUser.delete(proposal.userB);
+const samePending =
+  pendingMatchByUser.get(proposal.userA) === key &&
+  pendingMatchByUser.get(proposal.userB) === key;
 
-        activeMatches.set(proposal.userA, proposal.userB);
-        activeMatches.set(proposal.userB, proposal.userA);
+if (
+  !samePending ||
+  activeMatches.has(proposal.userA) ||
+  activeMatches.has(proposal.userB)
+) {
+  pendingMatches.delete(key);
+  pendingMatchByUser.delete(proposal.userA);
+  pendingMatchByUser.delete(proposal.userB);
+  unlockUserSearch(proposal.userA);
+  unlockUserSearch(proposal.userB);
+  return;
+}
+
+pendingMatches.delete(key);
+pendingMatchByUser.delete(proposal.userA);
+pendingMatchByUser.delete(proposal.userB);
+
+activeMatches.set(proposal.userA, proposal.userB);
+activeMatches.set(proposal.userB, proposal.userA);
         lockUserSearch(proposal.userA);
         lockUserSearch(proposal.userB);
 
@@ -3230,8 +3263,8 @@ if (proposal.chatType === "voice") {
   });
 
 socket.on("message", async (msgContent) => {
-  const me = socket.data.userName;
-  const partner = activeMatches.get(me);
+ const me = socket.data.userName;
+const partner = getVerifiedRandomChatPartner(me);
 
   if (!partner) {
     socket.emit("error_msg", { message: "لا يوجد شريك لإرسال الرسالة" });
@@ -3268,8 +3301,8 @@ socket.on("message", async (msgContent) => {
   socket.on("typing", async (isTyping) => {
     try {
       const me = socket.data.userName;
-      const partner = activeMatches.get(me);
-      if (!partner) return;
+const partner = getVerifiedRandomChatPartner(me);
+if (!partner) return;
 
       const key = `${pairKey(me, partner)}__${me}`;
       const oldTimeout = userTypingTimeout.get(key);
