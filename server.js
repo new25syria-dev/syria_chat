@@ -3053,134 +3053,128 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("accept_match", async (payload) => {
-    try {
-      const me = socket.data.userName;
-      if (!me) return;
+ socket.on("accept_match", async (payload) => {
+  try {
+    const me = socket.data.userName;
+    if (!me) return;
 
-      const requestedChatType = normalizeChatType(
-        payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
-      );
-      setUserPreferredChatType(me, requestedChatType, socket);
+    const requestedChatType = normalizeChatType(
+      payload?.chatType || socket.data.chatType || getUserPreferredChatType(me)
+    );
 
-      const key = pendingMatchByUser.get(me);
-      if (!key) return;
+    setUserPreferredChatType(me, requestedChatType, socket);
 
-      const proposal = pendingMatches.get(key);
-      if (!proposal) return;
+    const key = pendingMatchByUser.get(me);
+    if (!key) return;
 
-      proposal.acceptedBy.add(me);
-      const partner = proposal.userA === me ? proposal.userB : proposal.userA;
+    const proposal = pendingMatches.get(key);
+    if (!proposal) return;
 
-     if (proposal.timeoutId) {
-  clearTimeout(proposal.timeoutId);
-}
+    proposal.acceptedBy.add(me);
 
-const samePending =
-  pendingMatchByUser.get(proposal.userA) === key &&
-  pendingMatchByUser.get(proposal.userB) === key;
+    const partner = proposal.userA === me ? proposal.userB : proposal.userA;
 
-if (
-  !samePending ||
-  activeMatches.has(proposal.userA) ||
-  activeMatches.has(proposal.userB)
-) {
-  pendingMatches.delete(key);
-  pendingMatchByUser.delete(proposal.userA);
-  pendingMatchByUser.delete(proposal.userB);
-  unlockUserSearch(proposal.userA);
-  unlockUserSearch(proposal.userB);
-  return;
-}
+    if (proposal.acceptedBy.size === 2) {
+      if (proposal.timeoutId) {
+        clearTimeout(proposal.timeoutId);
+      }
 
-pendingMatches.delete(key);
-pendingMatchByUser.delete(proposal.userA);
-pendingMatchByUser.delete(proposal.userB);
+      const samePending =
+        pendingMatchByUser.get(proposal.userA) === key &&
+        pendingMatchByUser.get(proposal.userB) === key;
 
-activeMatches.set(proposal.userA, proposal.userB);
-activeMatches.set(proposal.userB, proposal.userA);
-        lockUserSearch(proposal.userA);
-        lockUserSearch(proposal.userB);
+      if (
+        !samePending ||
+        activeMatches.has(proposal.userA) ||
+        activeMatches.has(proposal.userB)
+      ) {
+        pendingMatches.delete(key);
+        pendingMatchByUser.delete(proposal.userA);
+        pendingMatchByUser.delete(proposal.userB);
+        unlockUserSearch(proposal.userA);
+        unlockUserSearch(proposal.userB);
+        return;
+      }
 
-        if (proposal.chatType === "voice") {
-          setVoiceMatchGrace(proposal.userA);
-          setVoiceMatchGrace(proposal.userB);
-          setRecentVoicePartner(proposal.userA, proposal.userB);
-        } else {
-          clearVoiceMatchGrace(proposal.userA);
-          clearVoiceMatchGrace(proposal.userB);
-          clearRecentVoicePartnerPair(proposal.userA, proposal.userB);
-        }
+      pendingMatches.delete(key);
+      pendingMatchByUser.delete(proposal.userA);
+      pendingMatchByUser.delete(proposal.userB);
 
-        logInfo("DEBUG", "match state stored", {
-          userA: proposal.userA,
-          userB: proposal.userB,
-          activeA: activeMatches.get(proposal.userA),
-          activeB: activeMatches.get(proposal.userB),
-          lockedA: isUserLocked(proposal.userA),
-          lockedB: isUserLocked(proposal.userB),
-          graceA: hasVoiceMatchGrace(proposal.userA),
-          graceB: hasVoiceMatchGrace(proposal.userB),
-          recentA: getRecentVoicePartner(proposal.userA) || null,
-          recentB: getRecentVoicePartner(proposal.userB) || null
-        });
+      activeMatches.set(proposal.userA, proposal.userB);
+      activeMatches.set(proposal.userB, proposal.userA);
 
-        const profileA = await getFullUserProfile(proposal.userA);
-        const profileB = await getFullUserProfile(proposal.userB);
+      lockUserSearch(proposal.userA);
+      lockUserSearch(proposal.userB);
+
+      if (proposal.chatType === "voice") {
+        setVoiceMatchGrace(proposal.userA);
+        setVoiceMatchGrace(proposal.userB);
+        setRecentVoicePartner(proposal.userA, proposal.userB);
+      } else {
+        clearVoiceMatchGrace(proposal.userA);
+        clearVoiceMatchGrace(proposal.userB);
+        clearRecentVoicePartnerPair(proposal.userA, proposal.userB);
+      }
+
+      const profileA = await getFullUserProfile(proposal.userA);
+      const profileB = await getFullUserProfile(proposal.userB);
 
       await emitToUser(proposal.userA, "match_confirmed", {
-  partnerName: profileB?.userName || proposal.userB,
-  partnerId: profileB?.userId || proposal.userB,
-  userA: proposal.userA,
-  userB: proposal.userB,
-  initiator: true,
-  age: profileB?.age ?? null,
-  country: profileB?.country ?? "",
-  bio: profileB?.bio ?? "",
-  gender: profileB?.gender ?? "unspecified",
-  profileImage: profileB?.profileImage ?? "",
-  lastSeen: profileB?.lastSeen ?? null,
-  online: profileB?.online === true,
-  chatType: proposal.chatType
-});
+        partnerName: profileB?.userName || proposal.userB,
+        partnerId: profileB?.userId || proposal.userB,
+        userA: proposal.userA,
+        userB: proposal.userB,
+        initiator: true,
+        age: profileB?.age ?? null,
+        country: profileB?.country ?? "",
+        bio: profileB?.bio ?? "",
+        gender: profileB?.gender ?? "unspecified",
+        profileImage: profileB?.profileImage ?? "",
+        lastSeen: profileB?.lastSeen ?? null,
+        online: profileB?.online === true,
+        chatType: proposal.chatType
+      });
 
-       await emitToUser(proposal.userB, "match_confirmed", {
-  partnerName: profileA?.userName || proposal.userA,
-  partnerId: profileA?.userId || proposal.userA,
-  userA: proposal.userA,
-  userB: proposal.userB,
-  initiator: false,
-  age: profileA?.age ?? null,
-  country: profileA?.country ?? "",
-  bio: profileA?.bio ?? "",
-  gender: profileA?.gender ?? "unspecified",
-  profileImage: profileA?.profileImage ?? "",
-  lastSeen: profileA?.lastSeen ?? null,
-  online: profileA?.online === true,
-  chatType: proposal.chatType
-});
-if (proposal.chatType === "voice") {
-  await activateRandomCallPair(proposal.userA, proposal.userB);
-}
-        logInfo("Matchmaking", `Match confirmed`, {
-          userA: proposal.userA,
-          userB: proposal.userB,
-          chatType: proposal.chatType
-        });
-      } else {
-        const meProfile = await getFullUserProfile(me);
-        await emitToUser(partner, "partner_accepted", {
-          message: "Partner is ready",
-          partnerName: meProfile?.userName || me,
-          partnerId: meProfile?.userId || me,
-          profileImage: meProfile?.profileImage || "",
-          chatType: proposal.chatType
-        });
+      await emitToUser(proposal.userB, "match_confirmed", {
+        partnerName: profileA?.userName || proposal.userA,
+        partnerId: profileA?.userId || proposal.userA,
+        userA: proposal.userA,
+        userB: proposal.userB,
+        initiator: false,
+        age: profileA?.age ?? null,
+        country: profileA?.country ?? "",
+        bio: profileA?.bio ?? "",
+        gender: profileA?.gender ?? "unspecified",
+        profileImage: profileA?.profileImage ?? "",
+        lastSeen: profileA?.lastSeen ?? null,
+        online: profileA?.online === true,
+        chatType: proposal.chatType
+      });
+
+      if (proposal.chatType === "voice") {
+        await activateRandomCallPair(proposal.userA, proposal.userB);
       }
-    } catch (err) {
-      logInfo("Error", "accept_match failed", err);
+
+      logInfo("Matchmaking", "Match confirmed", {
+        userA: proposal.userA,
+        userB: proposal.userB,
+        chatType: proposal.chatType
+      });
+    } else {
+      const meProfile = await getFullUserProfile(me);
+
+      await emitToUser(partner, "partner_accepted", {
+        message: "Partner is ready",
+        partnerName: meProfile?.userName || me,
+        partnerId: meProfile?.userId || me,
+        profileImage: meProfile?.profileImage || "",
+        chatType: proposal.chatType
+      });
     }
-  });
+  } catch (err) {
+    logInfo("Error", "accept_match failed", err);
+  }
+});
 
   socket.on("skip_partner", async (payload) => {
     try {
