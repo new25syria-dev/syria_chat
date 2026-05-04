@@ -4515,50 +4515,95 @@ const nearbyUsers = await getNearbyUsersForUser(me, maxDistanceMeters, limit);
       });
     }
   });
-   socket.on("send_nearby_chat_request", async (data) => {
+  socket.on("send_nearby_friend_request", async (data) => {
   try {
     const me = socket.data.userName;
     const to = extractTargetName(data);
 
     if (!me || !to || me === to) return;
 
-    const targetSocket = await getUserSocket(to);
-    if (!targetSocket) {
-      return socket.emit("nearby_chat_request_result", {
+    const targetUser = await User.findOne({
+      $or: [{ userName: to }, { userId: to }]
+    }).select("_id userName userId displayName profileImage").lean();
+
+    if (!targetUser) {
+      return socket.emit("nearby_friend_request_result", {
         success: false,
-        message: "المستخدم غير متصل الآن"
+        message: "المستخدم غير موجود"
+      });
+    }
+
+    const targetId = publicUserId(targetUser);
+
+    const alreadyFriends = await Friendship.findOne({
+      pairKey: pairKey(me, targetId)
+    }).lean();
+
+    if (alreadyFriends) {
+      return socket.emit("nearby_friend_request_result", {
+        success: false,
+        message: "أنتم أصدقاء بالفعل"
+      });
+    }
+
+    const existingReq = await FriendRequest.findOne({
+      from: me,
+      to: targetId,
+      status: "pending"
+    }).lean();
+
+    const reverseReq = await FriendRequest.findOne({
+      from: targetId,
+      to: me,
+      status: "pending"
+    }).lean();
+
+    if (existingReq) {
+      return socket.emit("nearby_friend_request_result", {
+        success: false,
+        message: "تم إرسال طلب صداقة سابقًا"
+      });
+    }
+
+    if (reverseReq) {
+      return socket.emit("nearby_friend_request_result", {
+        success: false,
+        message: "لديك طلب صداقة من هذا المستخدم بالفعل"
       });
     }
 
     const myProfile = await getFullUserProfile(me);
 
-    targetSocket.emit("nearby_chat_request", {
+    await FriendRequest.create({
+      from: me,
+      to: targetId
+    });
+
+    await emitToUser(targetId, "nearby_friend_request_received", {
       from: myProfile?.userName || me,
       fromId: me,
       userId: me,
       friendId: me,
-      partnerId: me,
       userName: myProfile?.userName || me,
       displayName: myProfile?.userName || me,
-      profileImage: myProfile?.profileImage || "",
-      distanceMeters: 1
+      profileImage: myProfile?.profileImage || ""
     });
 
-    socket.emit("nearby_chat_request_result", {
+    socket.emit("nearby_friend_request_result", {
       success: true,
-      to,
-      message: "تم إرسال طلب المراسلة"
+      to: targetId,
+      message: "تم إرسال طلب الصداقة"
     });
   } catch (err) {
-    logInfo("Nearby", "send_nearby_chat_request failed", err);
-    socket.emit("nearby_chat_request_result", {
+    logInfo("Nearby", "send_nearby_friend_request failed", err);
+    socket.emit("nearby_friend_request_result", {
       success: false,
-      message: "فشل إرسال طلب المراسلة"
+      message: "فشل إرسال طلب الصداقة"
     });
   }
 });
 
-socket.on("respond_nearby_chat_request", async (data) => {
+socket.on("respond_nearby_friend_request", async (data) => {
   try {
     const me = socket.data.userName;
     const from = extractTargetName(data);
@@ -4566,86 +4611,91 @@ socket.on("respond_nearby_chat_request", async (data) => {
 
     if (!me || !from || me === from) return;
 
+    const request = await FriendRequest.findOne({
+      from,
+      to: me,
+      status: "pending"
+    });
+
+    if (!request) {
+      return socket.emit("nearby_friend_request_response", {
+        success: false,
+        message: "طلب الصداقة غير موجود"
+      });
+    }
+
     const myProfile = await getFullUserProfile(me);
     const fromProfile = await getFullUserProfile(from);
 
     if (!accept) {
-      await emitToUser(from, "nearby_chat_rejected", {
+      request.status = "rejected";
+      await request.save();
+
+      await emitToUser(from, "nearby_friend_request_rejected", {
         by: me,
         byId: me,
-        userId: me,
         userName: myProfile?.userName || me,
         profileImage: myProfile?.profileImage || ""
       });
 
-      socket.emit("nearby_chat_request_closed", {
+      return socket.emit("nearby_friend_request_response", {
         success: true,
-        reason: "rejected"
+        accepted: false,
+        message: "تم رفض طلب الصداقة"
       });
-
-      return;
     }
 
-    activeMatches.set(me, from);
-    activeMatches.set(from, me);
+    request.status = "accepted";
+    await request.save();
 
-    await emitToUser(from, "nearby_chat_accepted", {
-      userId: me,
-      partnerId: me,
-      partnerName: myProfile?.userName || me,
+    const existingFriendship = await Friendship.findOne({
+      pairKey: pairKey(from, me)
+    }).lean();
+
+    if (!existingFriendship) {
+      await Friendship.create({
+        userA: from,
+        userB: me,
+        pairKey: pairKey(from, me)
+      });
+    }
+
+    await emitToUser(from, "nearby_friend_request_accepted", {
+      by: myProfile?.userName || me,
+      byId: me,
       userName: myProfile?.userName || me,
-      displayName: myProfile?.userName || me,
-      profileImage: myProfile?.profileImage || "",
-      chatType: "text"
+      profileImage: myProfile?.profileImage || ""
     });
 
-    socket.emit("nearby_chat_accepted", {
-      userId: from,
-      partnerId: from,
-      partnerName: fromProfile?.userName || from,
+    socket.emit("nearby_friend_request_response", {
+      success: true,
+      accepted: true,
+      message: "تم قبول طلب الصداقة"
+    });
+
+    await emitToUser(me, "friend_added_successfully", {
       userName: fromProfile?.userName || from,
-      displayName: fromProfile?.userName || from,
-      profileImage: fromProfile?.profileImage || "",
-      chatType: "text"
+      userId: from,
+      profileImage: fromProfile?.profileImage || ""
     });
 
-    await emitToUser(from, "match_confirmed", {
-      partnerName: myProfile?.userName || me,
-      partnerId: me,
-      profileImage: myProfile?.profileImage || "",
-      chatType: "text"
+    await emitToUser(from, "friend_added_successfully", {
+      userName: myProfile?.userName || me,
+      userId: me,
+      profileImage: myProfile?.profileImage || ""
     });
 
-    socket.emit("match_confirmed", {
-      partnerName: fromProfile?.userName || from,
-      partnerId: from,
-      profileImage: fromProfile?.profileImage || "",
-      chatType: "text"
-    });
+    await notifyFriendsStatusChanged(me);
+    await notifyFriendsStatusChanged(from);
   } catch (err) {
-    logInfo("Nearby", "respond_nearby_chat_request failed", err);
-    socket.emit("nearby_error", {
-      message: "فشل الرد على طلب المراسلة"
+    logInfo("Nearby", "respond_nearby_friend_request failed", err);
+    socket.emit("nearby_friend_request_response", {
+      success: false,
+      message: "فشل الرد على طلب الصداقة"
     });
   }
 });
-  socket.on("leave_nearby_chat", async (data) => {
-  try {
-    const me = socket.data.userName;
-    const partner = extractTargetName(data) || activeMatches.get(me);
-
-    if (!me || !partner) return;
-
-    activeMatches.delete(me);
-    activeMatches.delete(partner);
-
-    await emitToUser(partner, "nearby_chat_partner_left", {
-      reason: "partner_left"
-    });
-  } catch (err) {
-    logInfo("Nearby", "leave_nearby_chat failed", err);
-  }
-});
+ 
   socket.on("disconnect", async () => {
     const me = socket.data.userName;
     logInfo("Network", `Socket disconnected: ${socket.id} (User: ${me || "Guest"})`);
