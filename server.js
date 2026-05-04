@@ -3333,7 +3333,7 @@ if (!partner) return;
     let to = extractTargetName(targetName);
 
     if (!to) {
-      to = activeMatches.get(me) || "";
+     to = getVerifiedRandomChatPartner(me) || "";
     }
 
     if (!me || !to || me === to) return;
