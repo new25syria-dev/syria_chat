@@ -4443,18 +4443,26 @@ socket.on("webrtc_ice_candidate", async (data) => {
         }
       );
 
-     const nearbyUsers = await getNearbyUsersForUser(me, 3000000, 10);
+    const nearbyUsers = await getNearbyUsersForUser(me, 3000000, 10);
 
-      socket.emit("nearby_users", {
-        users: nearbyUsers,
-        updatedAt: new Date()
-      });
-    } catch (err) {
-      logInfo("Nearby", "update_location failed", err);
-      socket.emit("nearby_error", {
-        message: "Failed to update location"
-      });
-    }
+socket.emit("nearby_users", {
+  users: nearbyUsers,
+  updatedAt: new Date()
+});
+
+// تحديث المستخدمين القريبين أيضًا حتى يظهر هذا المستخدم عندهم
+for (const nearby of nearbyUsers) {
+  const nearbyId = normalizeName(nearby.userId);
+
+  if (!nearbyId || nearbyId === me) continue;
+
+  const refreshedList = await getNearbyUsersForUser(nearbyId, 3000000, 10);
+
+  await emitToUser(nearbyId, "nearby_users", {
+    users: refreshedList,
+    updatedAt: new Date()
+  });
+}
   });
 
   socket.on("get_nearby_users", async (data) => {
