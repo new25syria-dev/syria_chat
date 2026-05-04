@@ -4460,7 +4460,7 @@ socket.on("webrtc_ice_candidate", async (data) => {
 
      const maxDistanceMeters =
   Number.isFinite(Number(data?.maxDistanceMeters))
-    ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 300000)
+    ? Math.min(Math.max(Number(data.maxDistanceMeters), 100), 3000000)
     : 300000;
 
 const limit =
