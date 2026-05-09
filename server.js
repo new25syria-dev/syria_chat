@@ -2416,17 +2416,22 @@ async function getNearbyUsersForUser(userName, maxDistanceMeters = 3000000, limi
   }
 const friendIds = await getFriendIdsForUser(me);
 const blockedIds = new Set(friendIds.map(normalizeName));
-  const users = await User.find({
-    $and: [
-      { userName: { $ne: me } },
-      { userId: { $ne: me } },
-      { online: true },
-      { latitude: { $ne: null } },
-      { longitude: { $ne: null } },
-      { isBanned: { $ne: true } }
-    ]
-  })
-    .select("userId userName displayName profileImage latitude longitude online lastSeen")
+const ACTIVE_NEARBY_MS = 10 * 60 * 1000; // 10 دقائق
+const activeSince = new Date(Date.now() - ACTIVE_NEARBY_MS);
+
+const users = await User.find({
+  $and: [
+    { userName: { $ne: me } },
+    { userId: { $ne: me } },
+    { online: true },
+    { lastSeen: { $gte: activeSince } },
+    { locationUpdatedAt: { $gte: activeSince } },
+    { latitude: { $ne: null } },
+    { longitude: { $ne: null } },
+    { isBanned: { $ne: true } }
+  ]
+})
+   .select("userId userName displayName profileImage latitude longitude online lastSeen locationUpdatedAt")
     .lean();
 
   return users
