@@ -301,6 +301,29 @@ reportSchema.index({ reporter: 1, reported: 1 }, { unique: true });
 const User = mongoose.model("User", userSchema);
 const Friendship = mongoose.model("Friendship", friendshipSchema);
 const FriendRequest = mongoose.model("FriendRequest", friendRequestSchema);
+const FRIEND_REQUEST_TTL_MS = 10 * 60 * 1000;
+
+async function deleteFriendRequestAfter10Minutes(requestId) {
+  setTimeout(async () => {
+    try {
+      await FriendRequest.deleteOne({
+        _id: requestId,
+        status: "pending"
+      });
+
+      logInfo("FriendRequest", "Pending friend request auto deleted", {
+        requestId
+      });
+
+    } catch (err) {
+      logInfo(
+        "FriendRequest",
+        "Failed to auto delete pending friend request",
+        err
+      );
+    }
+  }, FRIEND_REQUEST_TTL_MS);
+}
 const PrivateMessage = mongoose.model("PrivateMessage", privateMessageSchema);
 const RandomChatMessage = mongoose.model("RandomChatMessage", randomChatMessageSchema);
 const Ban = mongoose.model("Ban", banSchema);
@@ -3385,7 +3408,12 @@ if (!partner) return;
 
       if (!existingReq) {
         const myProfile = await getFullUserProfile(me);
-        await FriendRequest.create({ from: me, to: targetId });
+      const friendRequest = await FriendRequest.create({
+  from: me,
+  to: targetId
+});
+
+deleteFriendRequestAfter10Minutes(friendRequest._id);
         await emitToUser(targetId, "new_friend_request", {
           from: myProfile?.userName || me,
           fromId: me,
@@ -4605,10 +4633,12 @@ const nearbyUsers = await getNearbyUsersForUser(me, maxDistanceMeters, limit);
 
     const myProfile = await getFullUserProfile(me);
 
-    await FriendRequest.create({
-      from: me,
-      to: targetId
-    });
+  const friendRequest = await FriendRequest.create({
+  from: me,
+  to: targetId
+});
+
+deleteFriendRequestAfter10Minutes(friendRequest._id);
 
     await emitToUser(targetId, "nearby_friend_request_received", {
       from: myProfile?.userName || me,
@@ -4893,7 +4923,23 @@ async function startMasterServer() {
     });
 
     logInfo("System", "Database connection established.");
+setInterval(async () => {
+  try {
+    await FriendRequest.deleteMany({
+      status: "pending",
+      createdAt: {
+        $lte: new Date(Date.now() - 10 * 60 * 1000)
+      }
+    });
 
+  } catch (err) {
+    logInfo(
+      "FriendRequest",
+      "Failed to cleanup old pending friend requests",
+      err
+    );
+  }
+}, 60 * 1000);
     server.listen(PORT, "0.0.0.0", () => {
       logInfo("System", `MASTER SERVER IS LIVE ON PORT ${PORT}`);
       logInfo("System", "Ready to receive connections from Flutter app.");
